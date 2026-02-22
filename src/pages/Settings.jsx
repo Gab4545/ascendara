@@ -54,6 +54,7 @@ import {
   SquareTerminal,
   Package,
   AlertTriangle,
+  FileCheck2,
   CpuIcon,
   CornerDownRight,
   Database,
@@ -287,6 +288,12 @@ function Settings() {
   const [isIndexRefreshing, setIsIndexRefreshing] = useState(false);
   const [showCustomColorsDialog, setShowCustomColorsDialog] = useState(false);
   const [controllerConnected, setControllerConnected] = useState(false);
+  const [runners, setRunners] = useState([]);
+  const [selectedRunner, setSelectedRunner] = useState("auto");
+  const [isDownloadingProton, setIsDownloadingProton] = useState(false);
+  const [protonGEInfo, setProtonGEInfo] = useState(null);
+  const [showProtonConfirm, setShowProtonConfirm] = useState(false);
+  const [protonUpdateStatus, setProtonUpdateStatus] = useState(null); // null | "checking" | "up-to-date" | "update-available"
   // Default custom colors for merging with saved themes (handles missing new properties)
   const defaultCustomColors = {
     background: "255 255 255",
@@ -444,7 +451,20 @@ function Settings() {
       const isWindows = await window.electron.isOnWindows();
       console.log("Is on Windows:", isWindows);
       setIsOnWindows(isWindows);
-      setIsOnLinux(!isWindows && navigator.userAgent.toLowerCase().includes("linux"));
+      const linux = !isWindows && navigator.userAgent.toLowerCase().includes("linux");
+      setIsOnLinux(linux);
+
+      // Load Linux runners if on Linux
+      if (linux) {
+        try {
+          const detectedRunners = await window.electron.getRunners();
+          setRunners(detectedRunners);
+          const currentSettings = await window.electron.getSettings();
+          setSelectedRunner(currentSettings.linuxRunner || "auto");
+        } catch (e) {
+          console.error("Failed to load runners:", e);
+        }
+      }
     };
     checkPlatform();
   }, []);
@@ -2326,6 +2346,341 @@ function Settings() {
                 </div>
               </div>
             </Card>
+
+            {/* ── Linux Compatibility Layer ── */}
+            {isOnLinux && (
+              <>
+                <Card className="border-border p-6">
+                  <div className="space-y-6">
+                    <h3 className="mb-2 text-xl font-semibold text-primary">
+                      Compatibility Layer
+                    </h3>
+                    <p className="text-sm text-muted-foreground">
+                      Configure how Windows games are launched on Linux using Proton or
+                      Wine.
+                    </p>
+
+                    {/* Runner Selection */}
+                    <div className="space-y-3">
+                      <label className="text-sm font-medium">Default Runner</label>
+                      <select
+                        value={selectedRunner}
+                        onChange={async e => {
+                          setSelectedRunner(e.target.value);
+                          await window.electron.updateSetting(
+                            "linuxRunner",
+                            e.target.value
+                          );
+                        }}
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                      >
+                        <option value="auto">Auto-detect (Recommended)</option>
+                        {runners.map(r => (
+                          <option key={r.path} value={r.path}>
+                            {r.name} (
+                            {r.source === "steam"
+                              ? "Steam"
+                              : r.source === "custom"
+                                ? "Custom"
+                                : "System"}
+                            ){r.version ? ` — v${r.version}` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Detected Runners List */}
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-medium">Detected Runners</h4>
+                      {runners.length === 0 ? (
+                        <p className="text-sm text-yellow-500">
+                          No Proton or Wine installation detected. Download Proton-GE
+                          below.
+                        </p>
+                      ) : (
+                        <ul className="space-y-1">
+                          {runners.map(r => (
+                            <li
+                              key={r.path}
+                              className="flex items-center gap-2 text-sm text-muted-foreground"
+                            >
+                              <span
+                                className={`h-2 w-2 rounded-full ${
+                                  r.source === "steam"
+                                    ? "bg-blue-500"
+                                    : r.source === "custom"
+                                      ? "bg-purple-500"
+                                      : "bg-green-500"
+                                }`}
+                              />
+                              <span className="text-foreground">{r.name}</span>
+                              <span>({r.source})</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap gap-3">
+                      {/* Download / Update Proton-GE */}
+                      <Button
+                        onClick={async () => {
+                          try {
+                            const info = await window.electron.getProtonGEInfo();
+                            if (!info.success) {
+                              console.error("Failed to get Proton-GE info:", info.error);
+                              return;
+                            }
+                            if (info.alreadyInstalled) {
+                              const updated = await window.electron.getRunners();
+                              setRunners(updated);
+                              return;
+                            }
+                            setProtonGEInfo(info);
+                            setShowProtonConfirm(true);
+                          } catch (e) {
+                            console.error("Failed to get Proton-GE info:", e);
+                          }
+                        }}
+                        disabled={isDownloadingProton}
+                        className="gap-2"
+                      >
+                        {isDownloadingProton ? (
+                          <>
+                            <Loader className="h-4 w-4 animate-spin" />
+                            Downloading...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="h-4 w-4" />
+                            {runners.some(r => r.name.toLowerCase().includes("ge-proton"))
+                              ? "Update Proton-GE"
+                              : "Download Proton-GE"}
+                          </>
+                        )}
+                      </Button>
+
+                      {/* Check for Updates */}
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          setProtonUpdateStatus("checking");
+                          try {
+                            const info = await window.electron.checkProtonGEUpdate();
+                            if (!info.success) {
+                              setProtonUpdateStatus(null);
+                              return;
+                            }
+                            if (info.alreadyInstalled) {
+                              setProtonUpdateStatus("up-to-date");
+                            } else if (info.updateAvailable) {
+                              setProtonUpdateStatus("update-available");
+                              setProtonGEInfo(info);
+                            } else {
+                              setProtonUpdateStatus(null);
+                            }
+                          } catch (e) {
+                            console.error("Failed to check for updates:", e);
+                            setProtonUpdateStatus(null);
+                          }
+                        }}
+                        disabled={protonUpdateStatus === "checking"}
+                        className="gap-2"
+                      >
+                        {protonUpdateStatus === "checking" ? (
+                          <>
+                            <Loader className="h-4 w-4 animate-spin" />
+                            Checking...
+                          </>
+                        ) : (
+                          <>
+                            <FolderSync className="h-4 w-4" />
+                            Check for Updates
+                          </>
+                        )}
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const result = await window.electron.selectCustomRunner();
+                          if (result.success) {
+                            setSelectedRunner(result.path);
+                            await window.electron.updateSetting(
+                              "linuxRunner",
+                              result.path
+                            );
+                            const updated = await window.electron.getRunners();
+                            setRunners(updated);
+                          } else if (result.error) {
+                            console.error("Custom runner error:", result.error);
+                          }
+                        }}
+                        className="gap-2"
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        Select Custom Runner
+                      </Button>
+
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const updated = await window.electron.getRunners();
+                          setRunners(updated);
+                        }}
+                        className="gap-2"
+                      >
+                        <FolderSync className="h-4 w-4" />
+                        Refresh
+                      </Button>
+                    </div>
+
+                    {/* Update Status Message */}
+                    {protonUpdateStatus === "up-to-date" && (
+                      <div className="flex items-center gap-2 rounded-lg border border-green-500/30 bg-green-500/10 p-3">
+                        <FileCheck2 className="h-4 w-4 text-green-500" />
+                        <p className="text-sm text-green-500">Proton-GE is up to date!</p>
+                      </div>
+                    )}
+
+                    {protonUpdateStatus === "update-available" && protonGEInfo && (
+                      <div className="flex items-center justify-between rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                          <p className="text-sm text-yellow-500">
+                            Update available:{" "}
+                            <strong>{protonGEInfo.latestVersion}</strong>
+                            {protonGEInfo.installedVersions.length > 0 && (
+                              <span className="text-yellow-500/70">
+                                {" "}
+                                (current: {protonGEInfo.installedVersions[0]})
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          onClick={() => setShowProtonConfirm(true)}
+                          className="gap-1"
+                        >
+                          <Download className="h-3 w-3" />
+                          Update
+                        </Button>
+                      </div>
+                    )}
+
+                    {/* Info Box */}
+                    <div className="rounded-lg border border-border bg-muted/50 p-3">
+                      <p className="text-xs text-muted-foreground">
+                        <strong>Proton</strong> (recommended) provides the best Windows
+                        game compatibility with automatic DXVK, VKD3D-Proton, and FSR
+                        support. <strong>Wine</strong> works but may require manual
+                        configuration for DirectX games.
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                {/* Proton-GE Download Confirmation Dialog */}
+                {showProtonConfirm && protonGEInfo && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                    <div className="mx-4 max-w-md space-y-4 rounded-xl border border-border bg-background p-6">
+                      <h3 className="text-lg font-semibold">
+                        {protonGEInfo.updateAvailable
+                          ? "Update Proton-GE"
+                          : "Download Proton-GE"}
+                      </h3>
+                      <div className="space-y-2 text-sm text-muted-foreground">
+                        <p>
+                          {protonGEInfo.updateAvailable ? (
+                            <>
+                              A new version of Proton-GE is available:{" "}
+                              <strong className="text-foreground">
+                                {protonGEInfo.name}
+                              </strong>
+                              {protonGEInfo.installedVersions.length > 0 && (
+                                <span>
+                                  {" "}
+                                  (replacing {protonGEInfo.installedVersions.join(", ")})
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              You are about to download{" "}
+                              <strong className="text-foreground">
+                                {protonGEInfo.name}
+                              </strong>
+                              .
+                            </>
+                          )}
+                        </p>
+                        <p>
+                          File:{" "}
+                          <code className="rounded bg-muted px-1">
+                            {protonGEInfo.fileName}
+                          </code>
+                        </p>
+                        <p>
+                          Size:{" "}
+                          <strong className="text-foreground">
+                            {protonGEInfo.sizeFormatted}
+                          </strong>{" "}
+                          (approximately{" "}
+                          {(protonGEInfo.size / (1024 * 1024 * 1024)).toFixed(1)} GB after
+                          extraction)
+                        </p>
+                        <p className="text-muted-foreground">
+                          Proton-GE is a custom build of Proton with additional patches
+                          for better game compatibility. It will be installed to{" "}
+                          <code className="rounded bg-muted px-1">
+                            ~/.ascendara/runners/
+                          </code>
+                        </p>
+                      </div>
+                      <div className="flex justify-end gap-3 pt-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setShowProtonConfirm(false);
+                            setProtonGEInfo(null);
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          onClick={async () => {
+                            setShowProtonConfirm(false);
+                            setProtonUpdateStatus(null);
+                            setIsDownloadingProton(true);
+                            try {
+                              const result = await window.electron.downloadProtonGE();
+                              if (result.success) {
+                                const updated = await window.electron.getRunners();
+                                setRunners(updated);
+                                if (result.path) {
+                                  setSelectedRunner(result.path);
+                                }
+                              }
+                            } catch (e) {
+                              console.error("Failed to download Proton-GE:", e);
+                            }
+                            setIsDownloadingProton(false);
+                            setProtonGEInfo(null);
+                          }}
+                          className="gap-2"
+                        >
+                          <Download className="h-4 w-4" />
+                          {protonGEInfo.updateAvailable
+                            ? `Update (${protonGEInfo.sizeFormatted})`
+                            : `Download (${protonGEInfo.sizeFormatted})`}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
 
             {/* Achievement Watcher Directories Card */}
             <Card className="border-border p-6">
