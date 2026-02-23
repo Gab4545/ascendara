@@ -54,6 +54,7 @@ import {
   SquareTerminal,
   Package,
   AlertTriangle,
+  FolderSync,
   FileCheck2,
   CpuIcon,
   CornerDownRight,
