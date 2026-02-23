@@ -215,6 +215,12 @@ function ThemeButton({ theme, currentTheme, onSelect }) {
 }
 
 const Welcome = ({ welcomeData, onComplete }) => {
+  const [runnersList, setRunnersList] = useState([]);
+  const [isOnLinux, setIsOnLinux] = useState(false);
+  const [protonGEInfo, setProtonGEInfo] = useState(null);
+  const [protonDetected, setProtonDetected] = useState(false);
+  const [protonInstalled, setProtonInstalled] = useState(false);
+  const [isDownloadingProton, setIsDownloadingProton] = useState(false);
   const { t } = useTranslation();
   const { language, changeLanguage } = useLanguage();
   const navigate = useNavigate();
@@ -2095,45 +2101,182 @@ const Welcome = ({ welcomeData, onComplete }) => {
                   </motion.div>
                 </>
               ) : (
+                /* ─── STEP 2: PROTON / WINE (NEW LOGIC) ─── */
                 <>
                   <motion.div
                     className="mb-8 flex items-center justify-center"
                     variants={itemVariants}
                   >
-                    <h2 className="text-4xl font-bold text-primary">
-                      {t("welcome.wineIsRequired")}{" "}
-                      <Wine size={32} className="mb-1 inline" />
+                    <h2 className="flex items-center gap-3 text-4xl font-bold text-primary">
+                      {t("welcome.compatibilityLayer") || "Compatibility Layer"}
+                      <Wine size={32} />
                     </h2>
                   </motion.div>
+
                   <motion.div
-                    className="mb-12 max-w-4xl space-y-6"
+                    className="mb-12 w-full max-w-4xl space-y-6"
                     variants={itemVariants}
                   >
-                    <p className="text-xl text-foreground/80">
-                      {t("welcome.wineMustBeInstalled")}
-                    </p>
-                    <div className="flex justify-center space-x-4">
-                      <Button
-                        onClick={async () => {
-                          const result = await window.electron.installWine();
-                          if (result.success) {
-                            handleNext();
-                          }
-                        }}
-                        size="lg"
-                        className="px-8 py-6 text-secondary"
+                    {/* Status Banner */}
+                    {runnersList.length > 0 ? (
+                      // FOUND
+                      <div
+                        className={`flex gap-4 rounded-xl border p-6 text-left ${
+                          runnersList.some(r => r.type === "proton")
+                            ? "border-green-500/30 bg-green-500/10"
+                            : "border-yellow-500/30 bg-yellow-500/10"
+                        }`}
                       >
-                        <FolderDownIcon className="mr-2 h-5 w-5" />
-                        {t("welcome.installWine")}
-                      </Button>
+                        {runnersList.some(r => r.type === "proton") ? (
+                          <CircleCheck className="mt-1 h-8 w-8 shrink-0 text-green-500" />
+                        ) : (
+                          <AlertTriangle className="mt-1 h-8 w-8 shrink-0 text-yellow-500" />
+                        )}
 
+                        <div className="w-full space-y-2">
+                          <h3
+                            className={`text-xl font-bold ${runnersList.some(r => r.type === "proton") ? "text-green-500" : "text-yellow-500"}`}
+                          >
+                            {runnersList.some(r => r.type === "proton")
+                              ? t("welcome.protonDetected") ||
+                                "Proton Detected - Ready to Play!"
+                              : t("welcome.wineDetected") || "Wine Detected"}
+                          </h3>
+
+                          <div className="space-y-1 rounded-lg border border-border/50 bg-background/40 p-3 font-mono text-sm">
+                            {runnersList.map(r => (
+                              <div
+                                key={r.path}
+                                className="flex items-center justify-between opacity-90"
+                              >
+                                <span className="font-semibold">{r.name}</span>
+                                <span className="ml-4 truncate text-xs opacity-60">
+                                  {r.path}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+
+                          {!runnersList.some(r => r.type === "proton") && (
+                            <p className="mt-2 text-sm font-medium text-yellow-500/90">
+                              Wine works, but <strong>Proton-GE is recommended</strong>{" "}
+                              for better performance and compatibility. You can install it
+                              below or skip.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      // NOT FOUND
+                      <div className="flex gap-4 rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-left">
+                        <XCircle className="mt-1 h-8 w-8 shrink-0 text-red-500" />
+                        <div>
+                          <h3 className="text-xl font-bold text-red-500">
+                            {t("welcome.noRunnersTitle") ||
+                              "No Compatibility Tool Detected"}
+                          </h3>
+                          <p className="mt-1 text-base text-red-400/90">
+                            {t("welcome.noRunnersDesc") ||
+                              "You won't be able to launch Windows games. Please install Proton-GE (Recommended) or Wine below."}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Install Options */}
+                    <div className="grid gap-4 text-left md:grid-cols-2">
+                      {/* Proton GE Card */}
+                      <div className="flex flex-col justify-between rounded-xl border-2 border-primary bg-primary/5 p-5 shadow-lg shadow-primary/5 transition-all hover:border-primary/50">
+                        <div>
+                          <div className="mb-2 flex items-center gap-2">
+                            <Rocket className="h-5 w-5 text-primary" />
+                            <span className="font-bold text-primary">
+                              Proton-GE (Recommended)
+                            </span>
+                          </div>
+                          <p className="mb-4 text-sm text-muted-foreground">
+                            Best for gaming. Includes DXVK, VKD3D, FSR & patches.
+                            {protonGEInfo && (
+                              <span className="mt-1 block font-mono text-xs opacity-75">
+                                Size: {protonGEInfo.sizeFormatted}
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                        <Button
+                          onClick={async () => {
+                            setIsDownloadingProton(true);
+                            try {
+                              if (!protonGEInfo) {
+                                const info = await window.electron.getProtonGEInfo();
+                                if (info.success) setProtonGEInfo(info);
+                              }
+                              const result = await window.electron.downloadProtonGE();
+                              if (result.success) {
+                                const updated = await window.electron.getRunners();
+                                setRunnersList(updated);
+                                setProtonInstalled(true);
+                              }
+                            } catch (e) {
+                              console.error(e);
+                              setErrorMessage(e.message);
+                              setShowErrorDialog(true);
+                            }
+                            setIsDownloadingProton(false);
+                          }}
+                          disabled={isDownloadingProton}
+                          className="w-full"
+                        >
+                          {isDownloadingProton ? (
+                            <Loader className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="mr-2 h-4 w-4" />
+                          )}
+                          {isDownloadingProton ? "Downloading..." : "Install Proton-GE"}
+                        </Button>
+                      </div>
+
+                      {/* Wine Card */}
+                      <div className="flex flex-col justify-between rounded-xl border border-border bg-card/50 p-5 transition-all hover:bg-card">
+                        <div>
+                          <div className="mb-2 flex items-center gap-2">
+                            <Wine className="h-5 w-5 text-foreground" />
+                            <span className="font-bold text-foreground">System Wine</span>
+                          </div>
+                          <p className="mb-4 text-sm text-muted-foreground">
+                            Basic compatibility using your system package manager.
+                          </p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          onClick={async () => {
+                            const result = await window.electron.installWine();
+                            if (result.success) {
+                              const updated = await window.electron.getRunners();
+                              setRunnersList(updated);
+                              setProtonInstalled(true);
+                            }
+                          }}
+                          className="w-full"
+                        >
+                          <FolderDownIcon className="mr-2 h-4 w-4" />
+                          Install Wine
+                        </Button>
+                      </div>
+                    </div>
+
+                    {/* Navigation Buttons */}
+                    <div className="flex justify-center pt-4">
                       <Button
                         onClick={() => handleNext()}
                         size="lg"
-                        className="px-8 py-6 text-secondary"
+                        className="px-12 py-6 text-lg"
+                        variant={runnersList.length > 0 ? "default" : "ghost"}
                       >
-                        <Rocket className="mr-2 h-5 w-5" />
-                        {t("welcome.haveWine")}
+                        {runnersList.length > 0
+                          ? t("welcome.continue") || "Continue"
+                          : t("welcome.skip") || "Skip for now"}
+                        <ArrowRight className="ml-2 h-5 w-5" />
                       </Button>
                     </div>
                   </motion.div>
@@ -2143,165 +2286,162 @@ const Welcome = ({ welcomeData, onComplete }) => {
           )}
 
           {step === "dependencies" && (
+            <motion.div
+              key="dependencies"
+              className="relative z-10 flex min-h-screen flex-col items-center justify-center p-8 text-center"
+              variants={containerVariants}
+              initial="hidden"
+              animate="visible"
+              exit="exit"
+            >
               <motion.div
-                key="dependencies"
-                className="relative z-10 flex min-h-screen flex-col items-center justify-center p-8 text-center"
-                variants={containerVariants}
-                initial="hidden"
-                animate="visible"
-                exit="exit"
+                className="mb-8 flex items-center justify-center"
+                variants={itemVariants}
               >
+                <h2 className="text-4xl font-bold text-primary">
+                  {t("welcome.essentialDependencies")}
+                </h2>
+              </motion.div>
+              {isIndexRefreshing && (
                 <motion.div
-                  className="mb-8 flex items-center justify-center"
+                  className="mb-6 flex items-center gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3"
                   variants={itemVariants}
                 >
-                  <h2 className="text-4xl font-bold text-primary">
-                    {t("welcome.essentialDependencies")}
-                  </h2>
-                </motion.div>
-                {isIndexRefreshing && (
-                  <motion.div
-                    className="mb-6 flex items-center gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3"
-                    variants={itemVariants}
-                  >
-                    <AlertTriangle className="h-5 w-5 flex-shrink-0 text-yellow-500" />
-                    <div className="text-left">
-                      <p className="text-sm font-medium text-yellow-600">
-                        {t("welcome.localIndex.stillRefreshing")}
-                      </p>
-                      <p className="text-xs text-yellow-600/80">
-                        {t("welcome.localIndex.waitForRefresh")}
-                      </p>
-                    </div>
-                  </motion.div>
-                )}
-                <motion.div className="mb-12 max-w-2xl space-y-6" variants={itemVariants}>
-                  <p className="text-xl text-foreground/80">
-                    {t("welcome.dependenciesDesc")}
-                  </p>
-                  <div className="grid grid-cols-2 gap-4 text-left text-muted-foreground">
-                    {[
-                      {
-                        name: ".NET Framework",
-                        desc: t("welcome.requiredForModernGames"),
-                      },
-                      { name: "DirectX", desc: t("welcome.graphicsAndMultimedia") },
-                      { name: "OpenAL", desc: t("welcome.audioProcessing") },
-                      { name: "Visual C++", desc: t("welcome.runtimeComponents") },
-                      {
-                        name: "XNA Framework",
-                        desc: t("welcome.gameDevelopmentFramework"),
-                      },
-                    ].map(dep => (
-                      <div key={dep.name} className="flex items-start space-x-3 p-4">
-                        {dependencyStatus[dep.name].icon}
-                        <div>
-                          <button
-                            type="button"
-                            onClick={() => window.electron.openURL(dep.url)}
-                            className="font-medium transition-colors hover:text-primary"
-                          >
-                            {dep.name}
-                          </button>
-                          <p className="text-sm text-foreground/60">{dep.desc}</p>
-                        </div>
-                      </div>
-                    ))}
+                  <AlertTriangle className="h-5 w-5 flex-shrink-0 text-yellow-500" />
+                  <div className="text-left">
+                    <p className="text-sm font-medium text-yellow-600">
+                      {t("welcome.localIndex.stillRefreshing")}
+                    </p>
+                    <p className="text-xs text-yellow-600/80">
+                      {t("welcome.localIndex.waitForRefresh")}
+                    </p>
                   </div>
                 </motion.div>
-
-                {isInstalling ? (
-                  <motion.div
-                    className="w-full max-w-md space-y-4"
-                    variants={itemVariants}
-                  >
-                    <p className="text-lg text-foreground/80">
-                      {t("welcome.installingDependencies")} {progress}/{totalDependencies}
-                    </p>
-                    <p className="text-sm text-foreground/60">
-                      {t("welcome.pleaseWaitAndRespondToAdminPrompts")}
-                    </p>
-                    <Progress
-                      value={(progress / totalDependencies) * 100}
-                      className="h-2"
-                    />
-                  </motion.div>
-                ) : indexComplete ? (
-                  <motion.div
-                    className="flex flex-col items-center space-y-6"
-                    variants={itemVariants}
-                  >
-                    <div className="flex justify-center space-x-4">
-                      <Button
-                        variant="outline"
-                        size="lg"
-                        onClick={() => setShowDepsAlert(true)}
-                        className="px-8 py-6 text-muted-foreground transition-colors hover:text-primary"
-                      >
-                        {t("welcome.installDependencies")}
-                      </Button>
-
-                      <Button
-                        onClick={() => handleExit(true)}
-                        size="lg"
-                        className="px-8 py-6"
-                      >
-                        <Rocket className="mr-2 h-5 w-5 text-secondary" />
-                        <span className="text-secondary">
-                          {t("welcome.iHaveTheseTakeMeToTheTour")}
-                        </span>
-                      </Button>
+              )}
+              <motion.div className="mb-12 max-w-2xl space-y-6" variants={itemVariants}>
+                <p className="text-xl text-foreground/80">
+                  {t("welcome.dependenciesDesc")}
+                </p>
+                <div className="grid grid-cols-2 gap-4 text-left text-muted-foreground">
+                  {[
+                    {
+                      name: ".NET Framework",
+                      desc: t("welcome.requiredForModernGames"),
+                    },
+                    { name: "DirectX", desc: t("welcome.graphicsAndMultimedia") },
+                    { name: "OpenAL", desc: t("welcome.audioProcessing") },
+                    { name: "Visual C++", desc: t("welcome.runtimeComponents") },
+                    {
+                      name: "XNA Framework",
+                      desc: t("welcome.gameDevelopmentFramework"),
+                    },
+                  ].map(dep => (
+                    <div key={dep.name} className="flex items-start space-x-3 p-4">
+                      {dependencyStatus[dep.name].icon}
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => window.electron.openURL(dep.url)}
+                          className="font-medium transition-colors hover:text-primary"
+                        >
+                          {dep.name}
+                        </button>
+                        <p className="text-sm text-foreground/60">{dep.desc}</p>
+                      </div>
                     </div>
-
-                    <button
-                      onClick={() => handleExit(false)}
-                      className="text-sm text-foreground/60 transition-colors hover:text-primary"
-                    >
-                      {t("welcome.skipTheTour")}
-                    </button>
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    className="flex flex-col items-center space-y-6"
-                    variants={itemVariants}
-                  >
-                    <div className="flex justify-center space-x-4">
-                      <Button
-                        variant="outline"
-                        size="lg"
-                        onClick={() => setShowDepsAlert(true)}
-                        className="px-8 py-6 text-muted-foreground transition-colors hover:text-primary"
-                      >
-                        {t("welcome.installDependencies")}
-                      </Button>
-
-                      <Button
-                        variant="outline"
-                        size="lg"
-                        onClick={() =>
-                          navigate("/localrefresh", {
-                            state: {
-                              welcomeStep: step,
-                              indexRefreshStarted,
-                              indexComplete,
-                            },
-                          })
-                        }
-                        className="px-8 py-6 text-muted-foreground transition-colors hover:text-primary"
-                      >
-                        <Database className="mr-2 h-5 w-5" />
-                        {t("welcome.localIndex.title")}
-                      </Button>
-                    </div>
-
-                    {isIndexRefreshing && (
-                      <p className="text-sm text-muted-foreground">
-                        {t("welcome.localIndex.stillRefreshing")}
-                      </p>
-                    )}
-                  </motion.div>
-                )}
+                  ))}
+                </div>
               </motion.div>
+
+              {isInstalling ? (
+                <motion.div className="w-full max-w-md space-y-4" variants={itemVariants}>
+                  <p className="text-lg text-foreground/80">
+                    {t("welcome.installingDependencies")} {progress}/{totalDependencies}
+                  </p>
+                  <p className="text-sm text-foreground/60">
+                    {t("welcome.pleaseWaitAndRespondToAdminPrompts")}
+                  </p>
+                  <Progress
+                    value={(progress / totalDependencies) * 100}
+                    className="h-2"
+                  />
+                </motion.div>
+              ) : indexComplete ? (
+                <motion.div
+                  className="flex flex-col items-center space-y-6"
+                  variants={itemVariants}
+                >
+                  <div className="flex justify-center space-x-4">
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      onClick={() => setShowDepsAlert(true)}
+                      className="px-8 py-6 text-muted-foreground transition-colors hover:text-primary"
+                    >
+                      {t("welcome.installDependencies")}
+                    </Button>
+
+                    <Button
+                      onClick={() => handleExit(true)}
+                      size="lg"
+                      className="px-8 py-6"
+                    >
+                      <Rocket className="mr-2 h-5 w-5 text-secondary" />
+                      <span className="text-secondary">
+                        {t("welcome.iHaveTheseTakeMeToTheTour")}
+                      </span>
+                    </Button>
+                  </div>
+
+                  <button
+                    onClick={() => handleExit(false)}
+                    className="text-sm text-foreground/60 transition-colors hover:text-primary"
+                  >
+                    {t("welcome.skipTheTour")}
+                  </button>
+                </motion.div>
+              ) : (
+                <motion.div
+                  className="flex flex-col items-center space-y-6"
+                  variants={itemVariants}
+                >
+                  <div className="flex justify-center space-x-4">
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      onClick={() => setShowDepsAlert(true)}
+                      className="px-8 py-6 text-muted-foreground transition-colors hover:text-primary"
+                    >
+                      {t("welcome.installDependencies")}
+                    </Button>
+
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      onClick={() =>
+                        navigate("/localrefresh", {
+                          state: {
+                            welcomeStep: step,
+                            indexRefreshStarted,
+                            indexComplete,
+                          },
+                        })
+                      }
+                      className="px-8 py-6 text-muted-foreground transition-colors hover:text-primary"
+                    >
+                      <Database className="mr-2 h-5 w-5" />
+                      {t("welcome.localIndex.title")}
+                    </Button>
+                  </div>
+
+                  {isIndexRefreshing && (
+                    <p className="text-sm text-muted-foreground">
+                      {t("welcome.localIndex.stillRefreshing")}
+                    </p>
+                  )}
+                </motion.div>
+              )}
+            </motion.div>
           )}
 
           {step === "installationComplete" && (
