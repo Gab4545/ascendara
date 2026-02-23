@@ -215,6 +215,7 @@ function ThemeButton({ theme, currentTheme, onSelect }) {
 }
 
 const Welcome = ({ welcomeData, onComplete }) => {
+  const [showProtonConfirm, setShowProtonConfirm] = useState(false);
   const [runnersList, setRunnersList] = useState([]);
   const [isOnLinux, setIsOnLinux] = useState(false);
   const [protonGEInfo, setProtonGEInfo] = useState(null);
@@ -695,6 +696,29 @@ const Welcome = ({ welcomeData, onComplete }) => {
     const checkPlatform = async () => {
       const isWindows = await window.electron.isOnWindows();
       setIsOnWindows(isWindows);
+
+      const isLinux = !isWindows && navigator.userAgent.toLowerCase().includes("linux");
+      setIsOnLinux(isLinux);
+
+      if (isLinux) {
+        // 1. Get runners
+        const runners = await window.electron.getRunners();
+        setRunnersList(runners);
+
+        if (runners.length > 0) {
+          setProtonInstalled(true);
+        }
+
+        // 2. Fetch Proton-GE info (for size display)
+        try {
+          const info = await window.electron.getProtonGEInfo();
+          if (info.success) {
+            setProtonGEInfo(info);
+          }
+        } catch (e) {
+          console.error("Failed to get Proton-GE info:", e);
+        }
+      }
     };
     checkPlatform();
   }, []);
@@ -2122,12 +2146,19 @@ const Welcome = ({ welcomeData, onComplete }) => {
                       // FOUND
                       <div
                         className={`flex gap-4 rounded-xl border p-6 text-left ${
-                          runnersList.some(r => r.type === "proton")
+                          runnersList.some(
+                            r =>
+                              r.type === "proton" ||
+                              r.name.toLowerCase().includes("proton")
+                          )
                             ? "border-green-500/30 bg-green-500/10"
                             : "border-yellow-500/30 bg-yellow-500/10"
                         }`}
                       >
-                        {runnersList.some(r => r.type === "proton") ? (
+                        {runnersList.some(
+                          r =>
+                            r.type === "proton" || r.name.toLowerCase().includes("proton")
+                        ) ? (
                           <CircleCheck className="mt-1 h-8 w-8 shrink-0 text-green-500" />
                         ) : (
                           <AlertTriangle className="mt-1 h-8 w-8 shrink-0 text-yellow-500" />
@@ -2135,9 +2166,13 @@ const Welcome = ({ welcomeData, onComplete }) => {
 
                         <div className="w-full space-y-2">
                           <h3
-                            className={`text-xl font-bold ${runnersList.some(r => r.type === "proton") ? "text-green-500" : "text-yellow-500"}`}
+                            className={`text-xl font-bold ${runnersList.some(r => r.type === "proton" || r.name.toLowerCase().includes("proton")) ? "text-green-500" : "text-yellow-500"}`}
                           >
-                            {runnersList.some(r => r.type === "proton")
+                            {runnersList.some(
+                              r =>
+                                r.type === "proton" ||
+                                r.name.toLowerCase().includes("proton")
+                            )
                               ? t("welcome.protonDetected") ||
                                 "Proton Detected - Ready to Play!"
                               : t("welcome.wineDetected") || "Wine Detected"}
@@ -2157,7 +2192,11 @@ const Welcome = ({ welcomeData, onComplete }) => {
                             ))}
                           </div>
 
-                          {!runnersList.some(r => r.type === "proton") && (
+                          {!runnersList.some(
+                            r =>
+                              r.type === "proton" ||
+                              r.name.toLowerCase().includes("proton")
+                          ) && (
                             <p className="mt-2 text-sm font-medium text-yellow-500/90">
                               Wine works, but <strong>Proton-GE is recommended</strong>{" "}
                               for better performance and compatibility. You can install it
@@ -2205,24 +2244,25 @@ const Welcome = ({ welcomeData, onComplete }) => {
                         </div>
                         <Button
                           onClick={async () => {
-                            setIsDownloadingProton(true);
-                            try {
-                              if (!protonGEInfo) {
+                            // 1. If we don't have the information, we fetch it
+                            if (!protonGEInfo) {
+                              setIsDownloadingProton(true);
+                              try {
                                 const info = await window.electron.getProtonGEInfo();
-                                if (info.success) setProtonGEInfo(info);
+                                if (info.success) {
+                                  setProtonGEInfo(info);
+                                  setShowProtonConfirm(true); // Open dialogue
+                                }
+                              } catch (e) {
+                                console.error(e);
+                                setErrorMessage(e.message);
+                                setShowErrorDialog(true);
                               }
-                              const result = await window.electron.downloadProtonGE();
-                              if (result.success) {
-                                const updated = await window.electron.getRunners();
-                                setRunnersList(updated);
-                                setProtonInstalled(true);
-                              }
-                            } catch (e) {
-                              console.error(e);
-                              setErrorMessage(e.message);
-                              setShowErrorDialog(true);
+                              setIsDownloadingProton(false);
+                            } else {
+                              // 2. If we already have the information, we open it directly.
+                              setShowProtonConfirm(true);
                             }
-                            setIsDownloadingProton(false);
                           }}
                           disabled={isDownloadingProton}
                           className="w-full"
@@ -2232,7 +2272,7 @@ const Welcome = ({ welcomeData, onComplete }) => {
                           ) : (
                             <Download className="mr-2 h-4 w-4" />
                           )}
-                          {isDownloadingProton ? "Downloading..." : "Install Proton-GE"}
+                          {isDownloadingProton ? "Checking..." : "Install Proton-GE"}
                         </Button>
                       </div>
 
@@ -2524,6 +2564,86 @@ const Welcome = ({ welcomeData, onComplete }) => {
           )}
         </AnimatePresence>
       </div>
+      {/* Proton-GE Download Confirmation Dialog */}
+      {showProtonConfirm && protonGEInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="mx-4 max-w-md space-y-4 rounded-xl border border-border bg-background p-6">
+            <h3 className="text-lg font-semibold">
+              {protonGEInfo.updateAvailable ? "Update Proton-GE" : "Download Proton-GE"}
+            </h3>
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>
+                {protonGEInfo.updateAvailable ? (
+                  <>
+                    A new version of Proton-GE is available:{" "}
+                    <strong className="text-foreground">{protonGEInfo.name}</strong>
+                    {protonGEInfo.installedVersions.length > 0 && (
+                      <span>
+                        {" "}
+                        (replacing {protonGEInfo.installedVersions.join(", ")})
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    You are about to download{" "}
+                    <strong className="text-foreground">{protonGEInfo.name}</strong>.
+                  </>
+                )}
+              </p>
+              <p>
+                File:{" "}
+                <code className="rounded bg-muted px-1">{protonGEInfo.fileName}</code>
+              </p>
+              <p>
+                Size:{" "}
+                <strong className="text-foreground">{protonGEInfo.sizeFormatted}</strong>{" "}
+                (approximately {(protonGEInfo.size / (1024 * 1024 * 1024)).toFixed(1)} GB
+                after extraction)
+              </p>
+              <p className="text-muted-foreground">
+                Proton-GE is a custom build of Proton with additional patches for better
+                game compatibility. It will be installed to{" "}
+                <code className="rounded bg-muted px-1">~/.ascendara/runners/</code>
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowProtonConfirm(false);
+                  setProtonGEInfo(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={async () => {
+                  setShowProtonConfirm(false);
+                  setIsDownloadingProton(true);
+                  try {
+                    const result = await window.electron.downloadProtonGE();
+                    if (result.success) {
+                      const updated = await window.electron.getRunners();
+                      setRunnersList(updated);
+                      setProtonInstalled(true);
+                      // Auto-select this runner
+                      await window.electron.updateSetting("linuxRunner", result.path);
+                    }
+                  } catch (e) {
+                    console.error("Failed to download Proton-GE:", e);
+                  }
+                  setIsDownloadingProton(false);
+                }}
+                className="gap-2"
+              >
+                <Download className="h-4 w-4" />
+                Download ({protonGEInfo.sizeFormatted})
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
