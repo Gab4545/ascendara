@@ -966,6 +966,11 @@
       "steps": "[{'description': 'The Ascendara Download Handler will automatically stop the download in your browser and start it for you in Ascendara. If you don\\'t have it, close the guide and click the \"Don\\'t have the extension? Get it for Chrome or Firefox\" button to download it.', 'title': 'The Ascendara Download Handler'}, {'description': 'After installing the extension, click the extension icon to enable the handler.', 'title': 'Step 1: Enable the Handler'}, {'description': 'The extension can stay on as it will only send known providers to Ascendara.', 'title': 'The Download Handler'}, {'description': 'Complete the CAPTCHA, and start the download.', 'title': 'Step 2: Start the download'}, {'description': 'Once the download tries to start, you will see a popup asking to open Ascendara. Toggle the always allow button to allow the extension to always send known providers to Ascendara.', 'title': 'Step 3: Using the Extension'}, {'description': 'Click the button to Open Ascendara.', 'title': 'Step 4: Downloading'}, {'description': \"Your download will automatically start in Ascendara. If you're not brought to the download page, navigate to it.\", 'title': \"That's it!\"}]",
       "title": "Downloading with Ascendara"
     },
+    "noDownloadPath": {
+      "desc": "You haven't set a download directory yet. Please go to Settings to choose where your games will be saved.",
+      "goToSettings": "Go to Settings",
+      "title": "No Download Directory Set"
+    },
     "noGameInfoAvailable": "Setup Ascendara Xtra in Preferences to see more information about this game",
     "noReviewsExplanation": "This game doesn't have any professional critic reviews available on OpenCritic. This could be because it's a new release, an indie title, or simply hasn't been reviewed yet.",
     "notExactMatch": "Game name didn't match exactly. Report the game if needed.",
@@ -1066,11 +1071,6 @@
       "torboxOffline": "This provider is offline on Torbox at the moment. Try another provider.",
       "torboxProcessingError": "Error processing Torbox link",
       "torrentSent": "Torrent sent to qBittorrent"
-    },
-    "noDownloadPath": {
-      "title": "No Download Directory Set",
-      "desc": "You haven't set a download directory yet. Please go to Settings to choose where your games will be saved.",
-      "goToSettings": "Go to Settings"
     },
     "topCriticScore": "Top Critic Score",
     "trainer": "Trainer Menu",
@@ -2298,6 +2298,7 @@
     "chooseWhenToUpdateAscendaraYourself": "Choose when to update Ascendara yourself. You'll be notified when updates are available, but they won't install automatically.",
     "chooseYourTheme": "Choose Your Theme",
     "clickTheExtensionIcon": "Click the extension icon and enable the download handler when you install it",
+    "compatibilityLayer": "Compatibility Layer",
     "continue": "Continue",
     "continueWithoutSharing": "Continue Without Sharing",
     "darkThemes": "Dark Themes",
@@ -2353,6 +2354,8 @@
     "manualUpdates": "Manual Updates",
     "neverAutomaticallyUpdate": "Never Automatically Update",
     "next": "Next",
+    "noRunnersDesc": "You won't be able to launch Windows games. Please install Proton-GE (Recommended) or Wine below.",
+    "noRunnersTitle": "No Compatibility Tool Detected",
     "notEnoughSpaceWarning": "Woah! You have less than 40 GB of free space on the selected drive. Consider clearing some space or selecting a different drive.",
     "noticeAppIsFree": {
       "point1": "Downloads and everything related to games on Ascendara will always be free",
@@ -2368,6 +2371,7 @@
     "personalizeYourExperience": "Personalize your experience with a theme that suits your style",
     "pleaseWaitAndRespondToAdminPrompts": "Please wait and respond to any administrator prompts that appear. Do not close the application.",
     "privacyPolicy": "Privacy Policy",
+    "protonDetected": "Proton Detected - Ready to Play!",
     "pythonIsRequired": "Python is Required",
     "pythonMustBeInstalled": "Python must be installed on your computer in order to run Ascendara's core tools on this operating system",
     "referral": {
@@ -2416,6 +2420,7 @@
     "welcomeTo": "Welcome to",
     "welcomeToAscendaraDescription": "You're almost ready to start using Ascendara. We'll go through the onboarding process together then setup your game index, but first please read the Terms of Service and Privacy Policy.",
     "whenYouClickADownloadLink": "When you start a download from a known provider, the extension will automatically stop the download in your browser and start it for you in Ascendara",
+    "wineDetected": "Wine Detected",
     "wineIsRequired": "Play with Wine",
     "wineMustBeInstalled": "Wine, DXVK, and other tools need to be installed and setup on your computer to run Window games. Don't worry though, Ascendara can install and set it up all just for you",
     "youCanAddMoreLater": "You can add more directories in preferences later",

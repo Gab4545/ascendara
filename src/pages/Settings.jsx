@@ -2354,7 +2354,7 @@ function Settings() {
                 <Card className="border-border p-6">
                   <div className="space-y-6">
                     <h3 className="mb-2 text-xl font-semibold text-primary">
-                      Compatibility Layer
+                      {t("welcome.compatibilityLayer")}
                     </h3>
                     <p className="text-sm text-muted-foreground">
                       Configure how Windows games are launched on Linux using Proton or

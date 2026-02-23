@@ -2132,7 +2132,7 @@ const Welcome = ({ welcomeData, onComplete }) => {
                     variants={itemVariants}
                   >
                     <h2 className="flex items-center gap-3 text-4xl font-bold text-primary">
-                      {t("welcome.compatibilityLayer") || "Compatibility Layer"}
+                      {t("welcome.compatibilityLayer")}
                       <Wine size={32} />
                     </h2>
                   </motion.div>
@@ -2173,9 +2173,8 @@ const Welcome = ({ welcomeData, onComplete }) => {
                                 r.type === "proton" ||
                                 r.name.toLowerCase().includes("proton")
                             )
-                              ? t("welcome.protonDetected") ||
-                                "Proton Detected - Ready to Play!"
-                              : t("welcome.wineDetected") || "Wine Detected"}
+                              ? t("welcome.protonDetected")
+                              : t("welcome.wineDetected")}
                           </h3>
 
                           <div className="space-y-1 rounded-lg border border-border/50 bg-background/40 p-3 font-mono text-sm">
@@ -2211,12 +2210,10 @@ const Welcome = ({ welcomeData, onComplete }) => {
                         <XCircle className="mt-1 h-8 w-8 shrink-0 text-red-500" />
                         <div>
                           <h3 className="text-xl font-bold text-red-500">
-                            {t("welcome.noRunnersTitle") ||
-                              "No Compatibility Tool Detected"}
+                            {t("welcome.noRunnersTitle")}
                           </h3>
                           <p className="mt-1 text-base text-red-400/90">
-                            {t("welcome.noRunnersDesc") ||
-                              "You won't be able to launch Windows games. Please install Proton-GE (Recommended) or Wine below."}
+                            {t("welcome.noRunnersDesc")}
                           </p>
                         </div>
                       </div>
