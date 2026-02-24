@@ -44,7 +44,12 @@ async function getDirectorySize(directoryPath) {
 
     for (const file of files) {
       const filePath = path.join(directoryPath, file);
-      const stats = await fs.stat(filePath);
+      // use lstat instead of stat to not follow symlinks
+      const stats = await fs.lstat(filePath);
+
+      if (stats.isSymbolicLink()) {
+        continue; // Ignoring symbolic links (like z:)
+      }
 
       if (stats.isDirectory()) {
         totalSize += await getDirectorySize(filePath);
@@ -888,7 +893,7 @@ function registerSystemHandlers() {
           : "pkexec apt-get install -y python3 python3-pip python3-venv unrar";
 
       await new Promise((resolve, reject) => {
-        const proc = exec(command, (error) => {
+        const proc = exec(command, error => {
           if (error) {
             updateStatus(`Error installing Python: ${error.message}`);
             setTimeout(() => {
@@ -916,17 +921,29 @@ function registerSystemHandlers() {
       updateProgress(40);
 
       const venvPath = path.join(os.homedir(), ".ascendara", "venv");
-      const packages = ["requests", "psutil", "pypresence", "patool", "pySmartDL", "cloudscraper", "beautifulsoup4", "rarfile"];
+      const packages = [
+        "requests",
+        "psutil",
+        "pypresence",
+        "patool",
+        "pySmartDL",
+        "cloudscraper",
+        "beautifulsoup4",
+        "rarfile",
+      ];
 
       await new Promise((resolveVenv, rejectVenv) => {
-        exec(`mkdir -p "${path.join(os.homedir(), ".ascendara")}" && python3 -m venv "${venvPath}"`, (err, _stdout, stderr) => {
-          if (err) {
-            console.error("venv creation failed:", stderr);
-            rejectVenv(err);
-          } else {
-            resolveVenv();
+        exec(
+          `mkdir -p "${path.join(os.homedir(), ".ascendara")}" && python3 -m venv "${venvPath}"`,
+          (err, _stdout, stderr) => {
+            if (err) {
+              console.error("venv creation failed:", stderr);
+              rejectVenv(err);
+            } else {
+              resolveVenv();
+            }
           }
-        });
+        );
       });
 
       updateStatus("Installing required packages...");
@@ -935,14 +952,17 @@ function registerSystemHandlers() {
       const venvPip = path.join(venvPath, "bin", "pip");
 
       await new Promise((resolvePackage, rejectPackage) => {
-        const pipProc = exec(`"${venvPip}" install ${packages.join(" ")}`, (err, _stdout, stderr) => {
-          if (err) {
-            console.error("Error installing packages:", stderr);
-            rejectPackage(err);
-          } else {
-            resolvePackage();
+        const pipProc = exec(
+          `"${venvPip}" install ${packages.join(" ")}`,
+          (err, _stdout, stderr) => {
+            if (err) {
+              console.error("Error installing packages:", stderr);
+              rejectPackage(err);
+            } else {
+              resolvePackage();
+            }
           }
-        });
+        );
 
         pipProc.stdout.on("data", data => {
           updateStatus(data.toString().trim());
