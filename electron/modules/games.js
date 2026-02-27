@@ -10,7 +10,7 @@ const axios = require("axios");
 const { spawn, execSync } = require("child_process");
 const { ipcMain, shell, dialog, app, BrowserWindow } = require("electron");
 const { isDev, isWindows, isLinux, appDirectory, getPythonPath } = require("./config");
-const { sanitizeText, getExtensionFromMimeType, shouldLogError } = require("./utils");
+const { sanitizeGameName, getExtensionFromMimeType, shouldLogError } = require("./utils");
 const { getSettingsManager } = require("./settings");
 const {
   setPlayingActivity,
@@ -235,7 +235,7 @@ function registerGameHandlers() {
     // 2. Standard
     if (!gameDirectory) {
       for (const dir of allDirectories) {
-        const stdDir = path.join(dir, game);
+        const stdDir = path.join(dir, sanitizeGameName(game));
         if (fs.existsSync(stdDir)) {
           gameDirectory = stdDir;
           break;
@@ -292,7 +292,7 @@ function registerGameHandlers() {
         let launchCommands = null;
 
         if (!isCustom) {
-          const sanitizedGame = sanitizeText(game);
+          const sanitizedGame = sanitizeGameName(game);
           let gameInfoPath;
 
           for (const directory of allDirectories) {
@@ -326,38 +326,46 @@ function registerGameHandlers() {
           }
 
           const executableToUse = specificExecutable || gameInfo.executable;
-          
+
           // Try to resolve the executable path
           if (path.isAbsolute(executableToUse)) {
             executable = executableToUse;
           } else {
             // First try relative to gameDirectory
             executable = path.join(gameDirectory, executableToUse);
-            
+
             // If not found, search in parent directory and subdirectories
             if (!fs.existsSync(executable)) {
               console.log(`[Games] Executable not found at expected path: ${executable}`);
               console.log(`[Games] Searching for executable in parent directory...`);
-              
+
               const parentDir = path.dirname(gameDirectory);
               const executableBasename = path.basename(executableToUse);
               let foundPath = null;
-              
+
               try {
                 // Search in parent directory
                 const parentContents = fs.readdirSync(parentDir, { withFileTypes: true });
-                
+
                 for (const dirent of parentContents) {
                   if (dirent.isDirectory()) {
-                    const testPath = path.join(parentDir, dirent.name, executableBasename);
+                    const testPath = path.join(
+                      parentDir,
+                      dirent.name,
+                      executableBasename
+                    );
                     if (fs.existsSync(testPath)) {
                       foundPath = testPath;
                       console.log(`[Games] Found executable at: ${foundPath}`);
                       break;
                     }
-                    
+
                     // Also check if the relative path works from this directory
-                    const testPathWithRelative = path.join(parentDir, dirent.name, executableToUse);
+                    const testPathWithRelative = path.join(
+                      parentDir,
+                      dirent.name,
+                      executableToUse
+                    );
                     if (fs.existsSync(testPathWithRelative)) {
                       foundPath = testPathWithRelative;
                       console.log(`[Games] Found executable at: ${foundPath}`);
@@ -368,7 +376,7 @@ function registerGameHandlers() {
               } catch (searchError) {
                 console.error(`[Games] Error searching for executable:`, searchError);
               }
-              
+
               if (foundPath) {
                 executable = foundPath;
                 // Update the game info file with the correct absolute path
@@ -450,7 +458,7 @@ function registerGameHandlers() {
             if (!isCustom) {
               const gameInfoPath = path.join(
                 gameDirectory,
-                `${sanitizeText(game)}.ascendara.json`
+                `${sanitizeGameName(game)}.ascendara.json`
               );
               if (fs.existsSync(gameInfoPath)) {
                 const gi = JSON.parse(fs.readFileSync(gameInfoPath, "utf8"));
@@ -765,7 +773,7 @@ function registerGameHandlers() {
       ...(settings.additionalDirectories || []),
     ];
     for (const dir of allDirectories) {
-      const stdDir = path.join(dir, game);
+      const stdDir = path.join(dir, sanitizeGameName(game));
       if (fs.existsSync(stdDir)) {
         for (const pattern of searchPatterns) {
           const p = path.join(stdDir, pattern);
@@ -897,7 +905,7 @@ function registerGameHandlers() {
         settings.downloadDirectory,
         ...(settings.additionalDirectories || []),
       ];
-      const sanitizedGame = sanitizeText(game);
+      const sanitizedGame = sanitizeGameName(game);
 
       for (const directory of allDirectories) {
         const gameInfoPath = path.join(
@@ -938,7 +946,7 @@ function registerGameHandlers() {
         settings.downloadDirectory,
         ...(settings.additionalDirectories || []),
       ];
-      const sanitizedGame = sanitizeText(game);
+      const sanitizedGame = sanitizeGameName(game);
 
       for (const directory of allDirectories) {
         const gameInfoPath = path.join(
@@ -1063,7 +1071,7 @@ function registerGameHandlers() {
         return { success: false, error: "Download directory not set" };
       }
 
-      const sanitizedGame = sanitizeText(gameName);
+      const sanitizedGame = sanitizeGameName(game);
       const allDirectories = [
         settings.downloadDirectory,
         ...(settings.additionalDirectories || []),
