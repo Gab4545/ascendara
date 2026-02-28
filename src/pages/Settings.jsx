@@ -2306,7 +2306,7 @@ function Settings() {
                         </Button>
                       </div>
                     </div>
-                    {isOnWindows && !settings.ludusavi.backupLocation && (
+                    {!settings.ludusavi.backupLocation && (
                       <div className="mt-2 flex items-center gap-2">
                         <AlertTriangle className="h-4 w-4 text-primary" />
                         <p className="text-sm text-primary">
@@ -2316,7 +2316,7 @@ function Settings() {
                     )}
                     <div className="mt-4 flex items-center justify-between">
                       <div
-                        className={`space-y-2 ${!isOnWindows || !settings.ludusavi.backupLocation ? "pointer-events-none opacity-50" : ""}`}
+                        className={`space-y-2 ${!settings.ludusavi.backupLocation ? "pointer-events-none opacity-50" : ""}`}
                       >
                         <Label>{t("settings.gameBackup.title")}</Label>
                         <p className="max-w-[70%] text-sm text-muted-foreground">
@@ -2333,14 +2333,6 @@ function Settings() {
                             <ExternalLink className="mb-1 ml-1 inline-block h-3 w-3" />
                           </a>
                         </p>
-                        {!isOnWindows && (
-                          <div className="flex items-center gap-2">
-                            <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                            <p className="whitespace-nowrap text-sm font-bold text-muted-foreground">
-                              {t("settings.onlyWindowsSupported2")}
-                            </p>
-                          </div>
-                        )}
                       </div>
                       <Switch
                         checked={settings.ludusavi.enabled}
@@ -2348,13 +2340,13 @@ function Settings() {
                           handleToggleLudusavi(value);
                           analytics.trackFeatureUsage("gameBackups", { enabled: value });
                         }}
-                        disabled={!isOnWindows || !settings.ludusavi.backupLocation}
+                        disabled={!settings.ludusavi.backupLocation}
                       />
                     </div>
                   </div>
                 </div>
                 <div
-                  className={`mt-6 space-y-6 ${!isOnWindows || !settings.ludusavi.enabled ? "pointer-events-none opacity-50" : ""}`}
+                  className={`mt-6 space-y-6 ${!settings.ludusavi.enabled ? "pointer-events-none opacity-50" : ""}`}
                 >
                   <div className="mt-4 flex items-center justify-between">
                     <div className="space-y-2">
@@ -2377,7 +2369,7 @@ function Settings() {
                           },
                         }));
                       }}
-                      disabled={!isOnWindows}
+                      disabled={false}
                     />
                   </div>
                   <div className="space-y-4">

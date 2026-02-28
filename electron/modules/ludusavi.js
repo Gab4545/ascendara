@@ -7,7 +7,7 @@ const fs = require("fs-extra");
 const path = require("path");
 const { spawn } = require("child_process");
 const { ipcMain, app } = require("electron");
-const { isDev, isWindows, appDirectory } = require("./config");
+const { isDev, isWindows, isLinux, appDirectory } = require("./config");
 const { getSettingsManager } = require("./settings");
 
 /**
@@ -18,10 +18,20 @@ function registerLudusaviHandlers() {
 
   ipcMain.handle("ludusavi", async (_, action, game, backupName) => {
     try {
-      if (isWindows) {
-        const ludusaviPath = isDev
-          ? path.join("./binaries/AscendaraGameHandler/dist/ludusavi.exe")
-          : path.join(appDirectory, "/resources/ludusavi.exe");
+      // Allow execution on both Windows and Linux
+      if (isWindows || isLinux) {
+        let ludusaviPath;
+        
+        if (isWindows) {
+          ludusaviPath = isDev
+            ? path.join("./binaries/AscendaraGameHandler/dist/ludusavi.exe")
+            : path.join(appDirectory, "/resources/ludusavi.exe");
+        } else {
+          // Linux Path
+          ludusaviPath = isDev
+            ? path.join("./binaries/AscendaraGameHandler/dist/ludusavi") 
+            : path.join(process.resourcesPath, "ludusavi");
+        }
 
         const settings = settingsManager.getSettings();
         const ludusaviSettings = settings.ludusavi || {};
@@ -143,7 +153,7 @@ function registerLudusaviHandlers() {
           });
         });
       } else {
-        return { success: false, error: "Ludusavi is only supported on Windows" };
+        return { success: false, error: "Ludusavi is only supported on Windows and linux" };
       }
     } catch (error) {
       console.error("Error executing ludusavi command:", error);
