@@ -307,6 +307,16 @@ def launch_with_umu(exe_path, linux_config, game_launch_cmd=None):
             stderr=subprocess.PIPE,
         )
         logging.info(f"[UMU] Process started, PID: {process.pid}")
+
+        # Read stdout/stderr in threads
+        import threading
+        def log_output(pipe, prefix):
+            for line in iter(pipe.readline, b''):
+                logging.info(f"{prefix} {line.decode('utf-8', errors='replace').strip()}")
+        
+        threading.Thread(target=log_output, args=(process.stdout, "[UMU-OUT]"), daemon=True).start()
+        threading.Thread(target=log_output, args=(process.stderr, "[UMU-ERR]"), daemon=True).start()
+        
         return process
     except Exception as e:
         logging.error(f"[UMU] Failed to launch: {e}", exc_info=True)
