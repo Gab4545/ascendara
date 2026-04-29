@@ -7,9 +7,160 @@ const fs = require("fs-extra");
 const path = require("path");
 const os = require("os");
 const { spawn } = require("child_process");
-const { ipcMain, app } = require("electron");
+const { ipcMain, app, dialog } = require("electron");
 const { isDev, isWindows, appDirectory } = require("./config");
 const { getSettingsManager } = require("./settings");
+
+/**
+ * Build and write the ludusavi config.yaml used for all commands.
+ * Includes redirects + all customGames entries from every game that has
+ * custom save paths configured.
+ *
+ * @param {string} configDir    - Directory where config.yaml is written
+ * @param {Array}  customGames  - [{ name, files: [], registry: [] }, ...]
+ */
+function writeLudusaviConfig(configDir, customGames = []) {
+  fs.ensureDirSync(configDir);
+
+  const localUserDir = os.homedir();
+  // Different default user according to the platform
+  const cloudUserDir = isWindows
+    ? "C:\\Users\\ascendara_user"
+    : "/home/ascendara_user";
+
+  let yaml = `redirects:\n`;
+  yaml += `  - kind: bidirectional\n`;
+
+  if (isWindows) {
+    yaml += `    source: "${localUserDir.replace(/\\/g, "\\\\")}"\n`;
+    yaml += `    target: "${cloudUserDir.replace(/\\/g, "\\\\")}"\n`;
+  } else {
+    yaml += `    source: "${localUserDir}"\n`;
+    yaml += `    target: "${cloudUserDir}"\n`;
+  }
+
+  if (customGames.length > 0) {
+    yaml += `\ncustomGames:\n`;
+    for (const cg of customGames) {
+      if (!cg.name) continue;
+      yaml += `  - name: "${cg.name.replace(/"/g, '\\"')}"\n`;
+
+      if (cg.files && cg.files.length > 0) {
+        yaml += `    files:\n`;
+        for (const f of cg.files) {
+          // Ludusavi expects forward slashes in YAML paths
+          const normalized = f.replace(/\\/g, "/");
+          yaml += `      - "${normalized.replace(/"/g, '\\"')}"\n`;
+        }
+      }
+
+      if (cg.registry && cg.registry.length > 0) {
+        yaml += `    registry:\n`;
+        for (const r of cg.registry) {
+          yaml += `      - "${r.replace(/"/g, '\\"')}"\n`;
+        }
+      }
+    }
+  }
+
+  const configFilePath = path.join(configDir, "config.yaml");
+  fs.writeFileSync(configFilePath, yaml.trim(), "utf8");
+}
+
+// Helpers: read / write customSavePaths in game JSON files
+
+function readCustomSavePaths(gameName, isCustomGame, settings) {
+  if (!settings.downloadDirectory) return [];
+  try {
+    if (isCustomGame) {
+      const gamesFilePath = path.join(settings.downloadDirectory, "games.json");
+      if (!fs.existsSync(gamesFilePath)) return [];
+      const data = JSON.parse(fs.readFileSync(gamesFilePath, "utf8"));
+      const gameInfo = data.games.find(g => g.game === gameName);
+      return gameInfo?.customSavePaths || [];
+    } else {
+      const gameInfoPath = path.join(
+        settings.downloadDirectory,
+        gameName,
+        `${gameName}.ascendara.json`
+      );
+      if (!fs.existsSync(gameInfoPath)) return [];
+      const data = JSON.parse(fs.readFileSync(gameInfoPath, "utf8"));
+      return data?.customSavePaths || [];
+    }
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomSavePaths(gameName, isCustomGame, settings, paths) {
+  if (!settings.downloadDirectory) throw new Error("Download directory not set");
+
+  if (isCustomGame) {
+    const gamesFilePath = path.join(settings.downloadDirectory, "games.json");
+    const data = JSON.parse(fs.readFileSync(gamesFilePath, "utf8"));
+    const gameInfo = data.games.find(g => g.game === gameName);
+    if (!gameInfo) throw new Error("Custom game not found");
+    if (paths.length > 0) gameInfo.customSavePaths = paths;
+    else delete gameInfo.customSavePaths;
+    fs.writeFileSync(gamesFilePath, JSON.stringify(data, null, 2));
+  } else {
+    const gameInfoPath = path.join(
+      settings.downloadDirectory,
+      gameName,
+      `${gameName}.ascendara.json`
+    );
+    const data = JSON.parse(fs.readFileSync(gameInfoPath, "utf8"));
+    if (paths.length > 0) data.customSavePaths = paths;
+    else delete data.customSavePaths;
+    fs.writeFileSync(gameInfoPath, JSON.stringify(data, null, 2));
+  }
+}
+
+/**
+ * Scan all games and return the full customGames list for config.yaml.
+ * Ludusavi needs the complete list every time — not just the current game.
+ */
+function collectAllCustomGames(settings) {
+  const result = [];
+  if (!settings.downloadDirectory) return result;
+
+  try {
+    const downloadDir = settings.downloadDirectory;
+
+    // Regular games (each has its own <name>.ascendara.json)
+    if (fs.existsSync(downloadDir)) {
+      for (const entry of fs.readdirSync(downloadDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const jsonPath = path.join(
+          downloadDir,
+          entry.name,
+          `${entry.name}.ascendara.json`
+        );
+        if (!fs.existsSync(jsonPath)) continue;
+        try {
+          const data = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+          if (data.customSavePaths?.length > 0) {
+            result.push({ name: entry.name, files: data.customSavePaths });
+          }
+        } catch { /* skip corrupt files */ }
+      }
+    }
+
+    // Custom games (stored in games.json)
+    const gamesFilePath = path.join(downloadDir, "games.json");
+    if (fs.existsSync(gamesFilePath)) {
+      const gamesData = JSON.parse(fs.readFileSync(gamesFilePath, "utf8"));
+      for (const g of gamesData.games || []) {
+        if (g.customSavePaths?.length > 0) {
+          result.push({ name: g.game || g.name, files: g.customSavePaths });
+        }
+      }
+    }
+  } catch { /* best-effort */ }
+
+  return result;
+}
 
 /**
  * Register Ludusavi IPC handlers
@@ -19,121 +170,139 @@ function registerLudusaviHandlers() {
 
   ipcMain.handle("ludusavi", async (_, action, game, backupName) => {
     try {
+      let ludusaviPath;
       if (isWindows) {
-        const ludusaviPath = isDev
+        ludusaviPath = isDev
           ? path.join("./binaries/AscendaraGameHandler/dist/ludusavi.exe")
           : path.join(appDirectory, "/resources/ludusavi.exe");
+      } else {
+        // Linux : downloaded in ~/.ascendara/
+        const { linuxConfigDir } = require("./config");
+        ludusaviPath = path.join(linuxConfigDir, "ludusavi");
+      }
 
-        const settings = settingsManager.getSettings();
-        const ludusaviSettings = settings.ludusavi || {};
+      if (!fs.existsSync(ludusaviPath)) {
+        console.error(`[Ludusavi] Executable not found at: ${ludusaviPath}`);
+        return {
+          success: false,
+          error: `Ludusavi executable not found at ${ludusaviPath}. Please install it from the Components page.`,
+        };
+      }
+
+      const settings = settingsManager.getSettings();
+      const ludusaviSettings = settings.ludusavi || {};
 
         if (!fs.existsSync(ludusaviPath)) {
           return { success: false, error: "Ludusavi executable not found" };
         }
-        
-        // Using ludusavi redirects
 
-        // 1. Define users
-        const localUserDir = os.homedir();
-        const cloudUserDir = "C:\\Users\\ascendara_user"; // Universal user
+      // Always regenerate config.yaml with up-to-date customGames before any command
+      const ludusaviConfigDir = path.join(app.getPath("userData"), "ludusavi-cloud-config");
+      const allCustomGames = collectAllCustomGames(settings);
+      writeLudusaviConfig(ludusaviConfigDir, allCustomGames);
 
-        // 2. Create a folder in the AppData folder to put the config file in it
-        const ludusaviConfigDir = path.join(app.getPath("userData"), "ludusavi-cloud-config");
-        fs.ensureDirSync(ludusaviConfigDir);
+      let args = [];
+      args.push("--config", ludusaviConfigDir);
 
-        // 3. Create config.yaml content
-        const configYamlContent = `
-redirects:
-  - kind: bidirectional
-    source: "${localUserDir.replace(/\\/g, '\\\\')}"
-    target: "${cloudUserDir.replace(/\\/g, '\\\\')}"
-`.trim();
+      switch (action) {
+        case "backup":
+          if (ludusaviSettings.backupOptions?.skipManifestCheck) {
+            args.push("--no-manifest-update");
+          }
+          args.push("backup");
 
-        // 4. Write file
-        const configFilePath = path.join(ludusaviConfigDir, "config.yaml");
-        fs.writeFileSync(configFilePath, configYamlContent, "utf8");
+          if (game) args.push(game);
+          args.push("--force");
 
-        let args = [];
-        args.push("--config", ludusaviConfigDir);
+          if (ludusaviSettings.backupLocation) {
+            args.push("--path", ludusaviSettings.backupLocation);
+          }
 
-        switch (action) {
-          case "backup":
-            if (ludusaviSettings.backupOptions?.skipManifestCheck) {
-              args.push("--no-manifest-update");
+          if (ludusaviSettings.backupFormat) {
+            args.push("--format", ludusaviSettings.backupFormat);
+          }
+
+          if (backupName) {
+            args.push("--backup", backupName);
+          }
+
+          if (ludusaviSettings.backupOptions?.compressionLevel) {
+            let compressionLevel = ludusaviSettings.backupOptions.compressionLevel;
+            if (compressionLevel === "default") compressionLevel = "deflate";
+            args.push("--compression", compressionLevel);
+          }
+
+          if (ludusaviSettings.backupOptions?.backupsToKeep) {
+            args.push("--full-limit", ludusaviSettings.backupOptions.backupsToKeep);
+          }
+
+          // Linux : add --wine-prefix if no customSavePaths for this game
+          if (!isWindows && game) {
+            const { sanitizeGameSlug } = require("./proton");
+            const { linuxCompatDataDir } = require("./config");
+            const customPaths = readCustomSavePaths(game, false, settings);
+            // verify custom games
+            const customPathsCustom = readCustomSavePaths(game, true, settings);
+            const hasCustomPaths = (customPaths.length + customPathsCustom.length) > 0;
+
+            if (!hasCustomPaths) {
+              const slug = sanitizeGameSlug(game);
+              const pfxPath = path.join(linuxCompatDataDir, slug, "pfx");
+              if (fs.existsSync(pfxPath)) {
+                args.push("--wine-prefix", pfxPath);
+                console.log(`[Ludusavi] Linux: using wine prefix at ${pfxPath}`);
+              } else {
+                console.warn(`[Ludusavi] Linux: wine prefix not found at ${pfxPath}, backup may find nothing`);
+              }
             }
-            args.push("backup");
+          }
 
-            if (game) args.push(game);
-            args.push("--force");
+          args.push("--api");
+          break;
 
-            if (ludusaviSettings.backupLocation) {
-              args.push("--path", ludusaviSettings.backupLocation);
-            }
-
-            if (ludusaviSettings.backupFormat) {
-              args.push("--format", ludusaviSettings.backupFormat);
-            }
-
-            if (backupName) {
-              args.push("--backup", backupName);
-            }
-
-            if (ludusaviSettings.backupOptions?.compressionLevel) {
-              let compressionLevel = ludusaviSettings.backupOptions.compressionLevel;
-              if (compressionLevel === "default") compressionLevel = "deflate";
-              args.push("--compression", compressionLevel);
-            }
-
-            if (ludusaviSettings.backupOptions?.backupsToKeep) {
-              args.push("--full-limit", ludusaviSettings.backupOptions.backupsToKeep);
-            }
-
-            args.push("--api");
-            break;
-
-          case "restore":
-            args.push("restore");
-            if (game) args.push(game);
-            args.push("--force");
-
+        case "restore":
+          args.push("restore");
+          if (game) args.push(game);
+          args.push("--force");
+          
             if (backupName) {
               args.push("--backup", backupName);
             }
             
-            if (ludusaviSettings.backupLocation) {
-              args.push("--path", ludusaviSettings.backupLocation);
-            }
+          if (ludusaviSettings.backupLocation) {
+            args.push("--path", ludusaviSettings.backupLocation);
+          }
 
-            if (ludusaviSettings.preferences?.skipConfirmations) {
-              args.push("--force");
-            }
+          if (ludusaviSettings.preferences?.skipConfirmations) {
+            args.push("--force");
+          }
 
-            args.push("--api");
-            break;
+          args.push("--api");
+          break;
 
-          case "list-backups":
-            args.push("backups");
-            if (game) args.push(game);
+        case "list-backups":
+          args.push("backups");
+          if (game) args.push(game);
 
-            if (ludusaviSettings.backupLocation) {
-              args.push("--path", ludusaviSettings.backupLocation);
-            }
+          if (ludusaviSettings.backupLocation) {
+            args.push("--path", ludusaviSettings.backupLocation);
+          }
+          
+          args.push("--api");
+          break;
 
-            args.push("--api");
-            break;
+        case "find-game":
+          args.push("find");
+          if (game) args.push(game);
+          args.push("--multiple");
+          args.push("--api");
+          break;
 
-          case "find-game":
-            args.push("find");
-            if (game) args.push(game);
-            args.push("--multiple");
-            args.push("--api");
-            break;
+        default:
+          return { success: false, error: `Unknown action: ${action}` };
+      }
 
-          default:
-            return { success: false, error: `Unknown action: ${action}` };
-        }
-
-        console.log(`Executing ludusavi command: ${ludusaviPath} ${args.join(" ")}`);
+      console.log(`Executing ludusavi command: ${ludusaviPath} ${args.join(" ")}`);
 
         const process = spawn(ludusaviPath, args);
 
@@ -170,13 +339,54 @@ redirects:
             reject({ success: false, error: err.message });
           });
         });
-      } else {
-        return { success: false, error: "Ludusavi is only supported on Windows" };
-      }
     } catch (error) {
       console.error("Error executing ludusavi command:", error);
       return { success: false, error: error.message };
     }
+  });
+
+  // Custom save paths: get
+  ipcMain.handle("get-custom-save-paths", async (_, gameName, isCustomGame) => {
+    try {
+      const settings = settingsManager.getSettings();
+      const paths = readCustomSavePaths(gameName, isCustomGame, settings);
+      return { success: true, paths };
+    } catch (error) {
+      console.error("Error in get-custom-save-paths:", error);
+      return { success: false, error: error.message, paths: [] };
+    }
+  });
+
+  // Custom save paths: set
+  // Persists to game json & immediately rewrites config.yaml.
+  ipcMain.handle("set-custom-save-paths", async (_, gameName, isCustomGame, paths) => {
+    try {
+      const settings = settingsManager.getSettings();
+
+      // Deduplicate & strip empties
+      const cleaned = [...new Set((paths || []).map(p => p.trim()).filter(Boolean))];
+
+      writeCustomSavePaths(gameName, isCustomGame, settings, cleaned);
+
+      // Eagerly regenerate config.yaml
+      const ludusaviConfigDir = path.join(app.getPath("userData"), "ludusavi-cloud-config");
+      const allCustomGames = collectAllCustomGames(settings);
+      writeLudusaviConfig(ludusaviConfigDir, allCustomGames);
+
+      return { success: true, paths: cleaned };
+    } catch (error) {
+      console.error("Error in set-custom-save-paths:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Open native folder picker
+  ipcMain.handle("open-folder-dialog", async () => {
+    const result = await dialog.showOpenDialog({ properties: ["openDirectory"] });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: true, path: null };
+    }
+    return { success: true, path: result.filePaths[0] };
   });
 
   // Enable game auto backups

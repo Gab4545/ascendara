@@ -160,6 +160,28 @@ function registerMiscHandlers() {
     shell.openExternal(url);
   });
 
+  // Resolve SteamGrid cover URLs for a game name (used by custom-source UI)
+  ipcMain.handle("steamgrid-get-urls", async (_, gameName) => {
+    try {
+      return await steamgrid.getImageUrls(gameName);
+    } catch (error) {
+      console.error("[SteamGrid] getImageUrls IPC error:", error);
+      return { gameId: null, grid: null, hero: null, logo: null, header: null };
+    }
+  });
+
+  // Lightweight: one-image header lookup for browse/search UI (2 requests
+  // instead of 5). Use this by default; switch to steamgrid-get-urls only
+  // when all four asset variants are actually needed.
+  ipcMain.handle("steamgrid-get-header", async (_, gameName) => {
+    try {
+      return await steamgrid.getHeaderUrl(gameName);
+    } catch (error) {
+      console.error("[SteamGrid] getHeaderUrl IPC error:", error);
+      return { gameId: null, url: null };
+    }
+  });
+
   // Read local file
   ipcMain.handle("read-local-file", async (_, filePath, encoding = "utf8") => {
     try {
@@ -915,30 +937,43 @@ function registerMiscHandlers() {
       let extension = ".jpg";
 
       if (imgID) {
-        if (settings.usingLocalIndex && settings.localIndex) {
-          const localImagePath = path.join(settings.localIndex, "imgs", `${imgID}.jpg`);
-          try {
-            imageBuffer = await fs.promises.readFile(localImagePath);
-          } catch (error) {
-            console.warn(`Could not load local image for ${imgID}:`, error);
+        // App only uses local index now
+      if (!settings.usingLocalIndex || !settings.localIndex) {
+        console.warn(`Cannot update game cover: local index is not enabled`);
+        return false;
+      }
+      
+      const localImagePath = path.join(settings.localIndex, "imgs", `${imgID}.jpg`);
+      try {
+        imageBuffer = await fs.promises.readFile(localImagePath);
+      } catch (error) {
+        console.warn(`Could not load local image for ${imgID}:`, error);
+        
+        // Try SteamGridDB fallback
+        try {
+          console.log(`Trying SteamGridDB fallback for game cover: ${game}`);
+          const steamGridHeader = await steamgrid.fetchGameHeader(game);
+          if (steamGridHeader && steamGridHeader.url) {
+            const response = await axios({
+              url: steamGridHeader.url,
+              method: "GET",
+              responseType: "arraybuffer",
+              timeout: 10000,
+            });
+            
+            imageBuffer = Buffer.from(response.data);
+            const mimeType = response.headers["content-type"];
+            extension = getExtensionFromMimeType(mimeType);
+            console.log(`SteamGridDB game cover downloaded for: ${game}`);
+          } else {
+            console.log(`No SteamGridDB game cover found for: ${game}`);
             return false;
           }
-        } else {
-          const imageLink =
-            settings.gameSource === "fitgirl"
-              ? `https://api.ascendara.app/v2/fitgirl/image/${imgID}`
-              : `https://api.ascendara.app/v2/image/${imgID}`;
-
-          const response = await axios({
-            url: imageLink,
-            method: "GET",
-            responseType: "arraybuffer",
-          });
-
-          imageBuffer = Buffer.from(response.data);
-          const mimeType = response.headers["content-type"];
-          extension = getExtensionFromMimeType(mimeType);
+        } catch (steamGridError) {
+          console.warn(`SteamGridDB fallback failed for ${game}:`, steamGridError.message);
+          return false;
         }
+      }
       } else if (imageData) {
         const base64Data = imageData.replace(/^data:image\/\w+;base64,/, "");
         imageBuffer = Buffer.from(base64Data, "base64");
@@ -1115,26 +1150,49 @@ function registerMiscHandlers() {
   });
 
   // qBittorrent handlers
-  const qbittorrentClient = axios.create({
-    baseURL: "http://localhost:8080/api/v2",
-    withCredentials: true,
-  });
-
   let qbittorrentSID = null;
+  let qbittorrentBaseUrl = null;
 
-  ipcMain.handle("qbittorrent:login", async (_, { username, password }) => {
+  const resolveQbitEndpoint = overrides => {
+    const manager = getSettingsManager();
+    const host = (overrides && overrides.host) || manager.getSetting("torrentHost") || "localhost";
+    const portRaw = (overrides && overrides.port) || manager.getSetting("torrentPort") || 8080;
+    const port = parseInt(portRaw, 10) || 8080;
+    const origin = `http://${host}:${port}`;
+    return { host, port, origin, baseURL: `${origin}/api/v2` };
+  };
+
+  ipcMain.handle("qbittorrent:login", async (_, credentials) => {
     try {
-      const response = await qbittorrentClient.post(
-        "/auth/login",
-        `username=${username}&password=${password}`,
+      const manager = getSettingsManager();
+      const username =
+        (credentials && credentials.username) ||
+        manager.getSetting("torrentUsername") ||
+        "admin";
+      const password =
+        (credentials && credentials.password) ||
+        manager.getSetting("torrentPassword") ||
+        "adminadmin";
+      const { origin, baseURL } = resolveQbitEndpoint(credentials);
+      qbittorrentBaseUrl = origin;
+
+      const response = await axios.post(
+        `${baseURL}/auth/login`,
+        `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
         {
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
-            Referer: "http://localhost:8080",
-            Origin: "http://localhost:8080",
+            Referer: origin,
+            Origin: origin,
           },
+          withCredentials: true,
+          timeout: 5000,
         }
       );
+
+      if (typeof response.data === "string" && response.data.trim().toLowerCase() === "fails.") {
+        return { success: false, error: "Authentication failed" };
+      }
 
       const setCookie = response.headers["set-cookie"];
       if (setCookie && setCookie[0]) {
@@ -1155,13 +1213,15 @@ function registerMiscHandlers() {
       if (!qbittorrentSID) {
         throw new Error("No SID available - please login first");
       }
-
-      const response = await qbittorrentClient.get("/app/version", {
+      const origin = qbittorrentBaseUrl || resolveQbitEndpoint().origin;
+      const response = await axios.get(`${origin}/api/v2/app/version`, {
         headers: {
-          Referer: "http://localhost:8080",
-          Origin: "http://localhost:8080",
+          Referer: origin,
+          Origin: origin,
           Cookie: `SID=${qbittorrentSID}`,
         },
+        withCredentials: true,
+        timeout: 5000,
       });
 
       return { success: true, version: response.data.replace(/['"]+/g, "") };
@@ -1551,6 +1611,185 @@ function registerMiscHandlers() {
     } catch (error) {
       console.error("Error generating QR code:", error);
       return { success: false, error: error.message };
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Custom List Storage
+  // Writes each imported list as a standalone JSON file under the user's
+  // Documents/Ascendara/CustomLists folder so it can be inspected, shared, or
+  // opened from the index info dialog.
+  // ---------------------------------------------------------------------------
+  const getCustomListsDir = () => {
+    const dir = path.join(app.getPath("documents"), "Ascendara", "CustomLists");
+    fs.ensureDirSync(dir);
+    return dir;
+  };
+  const safeListFileName = listId => {
+    const safe = String(listId).replace(/[^a-zA-Z0-9_-]/g, "_");
+    return `${safe}.json`;
+  };
+  const getCustomListFilePath = listId =>
+    path.join(getCustomListsDir(), safeListFileName(listId));
+
+  // ---------------------------------------------------------------------------
+  // External Source JSON Storage
+  // Persists user-provided JSON for external-source buckets under the user's
+  // configured local index directory (`<localIndex>/external-sources/`). This
+  // keeps the payload alongside the local game index and survives localStorage
+  // clears so the game service can load the source without hitting the network.
+  // ---------------------------------------------------------------------------
+  const getExternalSourcesDir = () => {
+    const settings = settingsManager.getSettings();
+    const base =
+      settings?.localIndex ||
+      path.join(app.getPath("appData"), "ascendara", "localindex");
+    const dir = path.join(base, "external-sources");
+    fs.ensureDirSync(dir);
+    return dir;
+  };
+  const safeExternalSourceFileName = sourceId => {
+    const safe = String(sourceId).replace(/[^a-zA-Z0-9_-]/g, "_");
+    return `${safe}.json`;
+  };
+  const getExternalSourceFilePath = sourceId =>
+    path.join(getExternalSourcesDir(), safeExternalSourceFileName(sourceId));
+
+  ipcMain.handle("get-external-sources-directory", () => {
+    try {
+      return getExternalSourcesDir();
+    } catch (err) {
+      console.error("get-external-sources-directory failed:", err);
+      return null;
+    }
+  });
+
+  ipcMain.handle("set-external-source-json", async (_, sourceId, data) => {
+    try {
+      if (!sourceId) throw new Error("Missing sourceId");
+      const filePath = getExternalSourceFilePath(sourceId);
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
+      return { success: true, path: filePath };
+    } catch (err) {
+      console.error("set-external-source-json failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("get-external-source-json", async (_, sourceId) => {
+    try {
+      if (!sourceId) return null;
+      const filePath = getExternalSourceFilePath(sourceId);
+      if (!(await fs.pathExists(filePath))) return null;
+      const raw = await fs.readFile(filePath, "utf8");
+      return JSON.parse(raw);
+    } catch (err) {
+      console.error("get-external-source-json failed:", err);
+      return null;
+    }
+  });
+
+  ipcMain.handle("remove-external-source-json", async (_, sourceId) => {
+    try {
+      if (!sourceId) return { success: false, error: "Missing sourceId" };
+      const filePath = getExternalSourceFilePath(sourceId);
+      if (await fs.pathExists(filePath)) {
+        await fs.remove(filePath);
+      }
+      return { success: true };
+    } catch (err) {
+      console.error("remove-external-source-json failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("get-custom-lists-directory", () => {
+    try {
+      return getCustomListsDir();
+    } catch (err) {
+      console.error("get-custom-lists-directory failed:", err);
+      return null;
+    }
+  });
+
+  ipcMain.handle("set-custom-list-data", async (_, listId, data) => {
+    try {
+      if (!listId) throw new Error("Missing listId");
+      const filePath = getCustomListFilePath(listId);
+      await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf8");
+      return { success: true, path: filePath };
+    } catch (err) {
+      console.error("set-custom-list-data failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("get-custom-list-data", async (_, listId) => {
+    try {
+      if (!listId) return null;
+      const filePath = getCustomListFilePath(listId);
+      if (!(await fs.pathExists(filePath))) return null;
+      const raw = await fs.readFile(filePath, "utf8");
+      return JSON.parse(raw);
+    } catch (err) {
+      console.error("get-custom-list-data failed:", err);
+      return null;
+    }
+  });
+
+  ipcMain.handle("get-custom-list-file-path", (_, listId) => {
+    try {
+      if (!listId) return null;
+      return getCustomListFilePath(listId);
+    } catch (err) {
+      console.error("get-custom-list-file-path failed:", err);
+      return null;
+    }
+  });
+
+  ipcMain.handle("remove-custom-list-data", async (_, listId) => {
+    try {
+      if (!listId) return { success: false, error: "Missing listId" };
+      const filePath = getCustomListFilePath(listId);
+      if (await fs.pathExists(filePath)) {
+        await fs.remove(filePath);
+      }
+      return { success: true };
+    } catch (err) {
+      console.error("remove-custom-list-data failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("open-custom-list-file", async (_, listId) => {
+    try {
+      if (!listId) return { success: false, error: "Missing listId" };
+      const filePath = getCustomListFilePath(listId);
+      if (!(await fs.pathExists(filePath))) {
+        return { success: false, error: "File not found" };
+      }
+      await shell.openPath(filePath);
+      return { success: true };
+    } catch (err) {
+      console.error("open-custom-list-file failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("show-custom-list-in-folder", async (_, listId) => {
+    try {
+      if (!listId) return { success: false, error: "Missing listId" };
+      const filePath = getCustomListFilePath(listId);
+      if (!(await fs.pathExists(filePath))) {
+        // Fall back to opening the directory itself
+        await shell.openPath(getCustomListsDir());
+        return { success: true };
+      }
+      shell.showItemInFolder(filePath);
+      return { success: true };
+    } catch (err) {
+      console.error("show-custom-list-in-folder failed:", err);
+      return { success: false, error: err.message };
     }
   });
 }

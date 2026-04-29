@@ -331,41 +331,31 @@ function registerDownloadHandlers() {
             }
           }
 
-          if (!headerImagePath && imageKey) {
-            const imageLink =
-              settings.gameSource === "fitgirl"
-                ? `https://api.ascendara.app/v2/fitgirl/image/${imgID}`
-                : `https://api.ascendara.app/v2/image/${imgID}`;
-
-            const timestamp = Math.floor(Date.now() / 1000);
-            const signature = crypto
-              .createHmac("sha256", imageKey)
-              .update(timestamp.toString())
-              .digest("hex");
-
+          // Try SteamGridDB fallback if no local image found
+          if (!headerImagePath) {
             try {
-              const response = await axios({
-                url: imageLink,
-                method: "GET",
-                responseType: "arraybuffer",
-                headers: {
-                  "X-Timestamp": timestamp.toString(),
-                  "X-Signature": signature,
-                  "Cache-Control": "no-store",
-                },
-              });
-
-              imageBuffer = Buffer.from(response.data);
-              const mimeType = response.headers["content-type"];
-              const extension = getExtensionFromMimeType(mimeType);
-              headerImagePath = path.join(gameDirectory, `header.ascendara${extension}`);
-              await fs.promises.writeFile(headerImagePath, imageBuffer);
-            } catch (imgError) {
-              console.error(`Failed to download header image: ${imgError.message}`);
-              // Continue without header image
+              console.log(`No local header image found, trying SteamGridDB fallback for: ${game}`);
+              const steamGridHeader = await steamgrid.fetchGameHeader(game);
+              if (steamGridHeader && steamGridHeader.url) {
+                const response = await axios({
+                  url: steamGridHeader.url,
+                  method: "GET",
+                  responseType: "arraybuffer",
+                  timeout: 10000,
+                });
+                
+                imageBuffer = Buffer.from(response.data);
+                const mimeType = response.headers["content-type"];
+                const extension = getExtensionFromMimeType(mimeType);
+                headerImagePath = path.join(gameDirectory, `header.ascendara${extension}`);
+                await fs.promises.writeFile(headerImagePath, imageBuffer);
+                console.log(`SteamGridDB header image downloaded and saved: ${headerImagePath}`);
+              } else {
+                console.log(`No SteamGridDB header image found for: ${game}`);
+              }
+            } catch (steamGridError) {
+              console.warn(`SteamGridDB fallback failed for ${game}:`, steamGridError.message);
             }
-          } else if (!headerImagePath) {
-            console.log(`Skipping header image download: imageKey not available`);
           }
         } else {
           console.log(`No imgID provided, skipping header image download`);
@@ -381,11 +371,15 @@ function registerDownloadHandlers() {
           .catch(err => console.error(`[Download] Assets download failed:`, err));
         let executablePath;
         let spawnCommand;
+        const linkStr = typeof link === "string" ? link.trim().toLowerCase() : "";
+        const isMagnetLink = linkStr.startsWith("magnet:");
+        const isDotTorrentFile = linkStr.split("?")[0].endsWith(".torrent");
+        const isTorrentLink = isMagnetLink || isDotTorrentFile;
 
         if (isWindows) {
           executablePath = isDev
             ? path.join(
-                settings.gameSource === "fitgirl"
+                isTorrentLink
                   ? "./binaries/AscendaraTorrentHandler/dist/AscendaraTorrentHandler.exe"
                   : link.includes("gofile.io")
                     ? "./binaries/AscendaraDownloader/dist/AscendaraGofileHelper.exe"
@@ -393,18 +387,52 @@ function registerDownloadHandlers() {
               )
             : path.join(
                 appDirectory,
-                settings.gameSource === "fitgirl"
+                isTorrentLink
                   ? "/resources/AscendaraTorrentHandler.exe"
                   : link.includes("gofile.io")
                     ? "/resources/AscendaraGofileHelper.exe"
                     : "/resources/AscendaraDownloader.exe"
               );
 
-          spawnCommand =
-            settings.gameSource === "fitgirl"
+          spawnCommand = isTorrentLink
+            ? [
+                link,
+                sanitizedGame,
+                online,
+                dlc,
+                isVr,
+                updateFlow,
+                version || -1,
+                size,
+                settings.downloadDirectory,
+              ]
+            : [
+                link.includes("gofile.io") ? "https://" + link : link,
+                sanitizedGame,
+                online,
+                dlc,
+                isVr,
+                updateFlow,
+                version || -1,
+                size,
+                targetDirectory,
+                gameID || "",
+              ];
+        } else {
+          if (isDev) {
+            executablePath = getPythonPath();
+            const scriptPath = path.join(
+              isTorrentLink
+                ? "./binaries/AscendaraTorrentHandler/src/AscendaraTorrentHandler.py"
+                : link.includes("gofile.io")
+                  ? "./binaries/AscendaraDownloader/src/AscendaraGofileHelper.py"
+                  : "./binaries/AscendaraDownloader/src/AscendaraDownloader.py"
+            );
+            spawnCommand = isTorrentLink
               ? [
+                  scriptPath,
                   link,
-                  sanitizedGame,
+                  game,
                   online,
                   dlc,
                   isVr,
@@ -414,8 +442,9 @@ function registerDownloadHandlers() {
                   settings.downloadDirectory,
                 ]
               : [
+                  scriptPath,
                   link.includes("gofile.io") ? "https://" + link : link,
-                  sanitizedGame,
+                  game,
                   online,
                   dlc,
                   isVr,
@@ -425,66 +454,28 @@ function registerDownloadHandlers() {
                   targetDirectory,
                   gameID || "",
                 ];
-        } else {
-          if (isDev) {
-            executablePath = getPythonPath();
-            const scriptPath = path.join(
-              settings.gameSource === "fitgirl"
-                ? "./binaries/AscendaraTorrentHandler/src/AscendaraTorrentHandler.py"
-                : link.includes("gofile.io")
-                  ? "./binaries/AscendaraDownloader/src/AscendaraGofileHelper.py"
-                  : "./binaries/AscendaraDownloader/src/AscendaraDownloader.py"
-            );
-            spawnCommand =
-              settings.gameSource === "fitgirl"
-                ? [
-                    scriptPath,
-                    link,
-                    game,
-                    online,
-                    dlc,
-                    isVr,
-                    updateFlow,
-                    version || -1,
-                    size,
-                    settings.downloadDirectory,
-                  ]
-                : [
-                    scriptPath,
-                    link.includes("gofile.io") ? "https://" + link : link,
-                    game,
-                    online,
-                    dlc,
-                    isVr,
-                    updateFlow,
-                    version || -1,
-                    size,
-                    targetDirectory,
-                    gameID || "",
-                  ];
           } else {
             executablePath = path.join(
               process.resourcesPath,
-              settings.gameSource === "fitgirl"
+              isTorrentLink
                 ? "AscendaraTorrentHandler"
                 : link.includes("gofile.io")
                   ? "AscendaraGofileHelper"
                   : "AscendaraDownloader"
             );
-            spawnCommand =
-              settings.gameSource === "fitgirl"
-                ? [
-                    link,
-                    game,
-                    online,
-                    dlc,
-                    isVr,
-                    updateFlow,
-                    version || -1,
-                    size,
-                    settings.downloadDirectory,
-                  ]
-                : [
+            spawnCommand = isTorrentLink
+              ? [
+                  link,
+                  game,
+                  online,
+                  dlc,
+                  isVr,
+                  updateFlow,
+                  version || -1,
+                  size,
+                  settings.downloadDirectory,
+                ]
+              : [
                     link.includes("gofile.io") ? "https://" + link : link,
                     game,
                     online,
@@ -502,6 +493,24 @@ function registerDownloadHandlers() {
         // Add notification flags if enabled
         if (settings.notifications) {
           spawnCommand = spawnCommand.concat(["--withNotification", settings.theme]);
+        }
+
+        // For torrent downloads, pass the user's qBittorrent WebUI config
+        if (isTorrentLink) {
+          const qbHost = settings.torrentHost || "localhost";
+          const qbPort = settings.torrentPort || 8080;
+          const qbUser = settings.torrentUsername || "admin";
+          const qbPass = settings.torrentPassword || "adminadmin";
+          spawnCommand = spawnCommand.concat([
+            "--qbitHost",
+            String(qbHost),
+            "--qbitPort",
+            String(qbPort),
+            "--qbitUsername",
+            String(qbUser),
+            "--qbitPassword",
+            String(qbPass),
+          ]);
         }
 
         // Cache download data for resume functionality

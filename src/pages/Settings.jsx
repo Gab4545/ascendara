@@ -76,6 +76,7 @@ import {
   Gamepad2,
   Terminal,
   Wine,
+  ClipboardList,
 } from "lucide-react";
 import gameService from "@/services/gameService";
 import { Link, useNavigate } from "react-router-dom";
@@ -282,6 +283,9 @@ function Settings() {
   const [isTriggering, setIsTriggering] = useState(false);
   const [apiMetadata, setApiMetadata] = useState(null);
   const [torboxApiKey, setTorboxApiKey] = useState(null);
+  const [qbitConfigDraft, setQbitConfigDraft] = useState(null);
+  const [qbitStatusRefreshKey, setQbitStatusRefreshKey] = useState(0);
+  const [hideQbitInstallNote, setHideQbitInstallNote] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isOnWindows, setIsOnWindows] = useState(null);
   const [isOnLinux, setIsOnLinux] = useState(false);
@@ -301,6 +305,8 @@ function Settings() {
   const [exclusionLoading, setExclusionLoading] = useState(false);
   const [lastRefreshTime, setLastRefreshTime] = useState(null);
   const [isIndexRefreshing, setIsIndexRefreshing] = useState(false);
+  const [indexRefreshProgress, setIndexRefreshProgress] = useState(null); // { progress, phase, processedPosts, totalPosts }
+  const [indexInfo, setIndexInfo] = useState(null); // { gameCount, date, size }
   const [showCustomColorsDialog, setShowCustomColorsDialog] = useState(false);
   const [controllerConnected, setControllerConnected] = useState(false);
   const [runners, setRunners] = useState([]);
@@ -403,7 +409,15 @@ function Settings() {
           // Check if refresh is currently running
           if (window.electron?.getLocalRefreshStatus) {
             const status = await window.electron.getLocalRefreshStatus(indexPath);
-            setIsIndexRefreshing(status.isRunning);
+            setIsIndexRefreshing(!!status.isRunning);
+            if (status.isRunning && status.progress) {
+              setIndexRefreshProgress({
+                progress: status.progress.progress,
+                phase: status.progress.phase,
+                processedPosts: status.progress.processedPosts,
+                totalPosts: status.progress.totalPosts,
+              });
+            }
             // Use lastSuccessfulTimestamp which persists across refresh attempts
             if (status.progress?.lastSuccessfulTimestamp) {
               setLastRefreshTime(
@@ -417,7 +431,16 @@ function Settings() {
               setLastRefreshTime(new Date(progress.lastSuccessfulTimestamp * 1000));
             }
             // Check status from progress file
-            setIsIndexRefreshing(progress?.status === "running");
+            const running = progress?.status === "running";
+            setIsIndexRefreshing(running);
+            if (running) {
+              setIndexRefreshProgress({
+                progress: progress.progress,
+                phase: progress.phase,
+                processedPosts: progress.processedPosts,
+                totalPosts: progress.totalPosts,
+              });
+            }
           }
         }
       } catch (e) {
@@ -426,20 +449,44 @@ function Settings() {
     };
     loadRefreshStatus();
 
-    // Listen for refresh progress updates
+    // Listen for refresh progress updates using the same handlers as LocalRefresh
     if (window.electron?.onLocalRefreshProgress) {
-      const handleProgress = data => {
-        if (data.status === "running") {
-          setIsIndexRefreshing(true);
-        } else if (data.status === "completed" || data.status === "failed") {
+      const handleProgressUpdate = async data => {
+        // Any progress update while status is not terminal means a refresh is active
+        if (data.status === "completed" || data.status === "failed" || data.status === "error") {
           setIsIndexRefreshing(false);
-          // Use lastSuccessfulTimestamp which only updates on successful completion
-          if (data.lastSuccessfulTimestamp) {
+          setIndexRefreshProgress(null);
+          if (data.status === "completed" && data.lastSuccessfulTimestamp) {
             setLastRefreshTime(new Date(data.lastSuccessfulTimestamp * 1000));
           }
+          return;
+        }
+        setIsIndexRefreshing(true);
+        setIndexRefreshProgress(prev => ({
+          progress: data.progress ?? prev?.progress,
+          phase: data.phase ?? prev?.phase,
+          processedPosts: data.processedPosts ?? prev?.processedPosts,
+          totalPosts: data.totalPosts ?? prev?.totalPosts,
+        }));
+      };
+
+      const handleComplete = async data => {
+        setIsIndexRefreshing(false);
+        setIndexRefreshProgress(null);
+        if (data.code === 0 && data.lastSuccessfulTimestamp) {
+          setLastRefreshTime(new Date(data.lastSuccessfulTimestamp * 1000));
         }
       };
-      window.electron.onLocalRefreshProgress(handleProgress);
+
+      const handleError = () => {
+        setIsIndexRefreshing(false);
+        setIndexRefreshProgress(null);
+      };
+
+      // Subscribe to IPC events
+      window.electron.onLocalRefreshProgress(handleProgressUpdate);
+      window.electron.onLocalRefreshComplete(handleComplete);
+      window.electron.onLocalRefreshError(handleError);
 
       // Listen for public index download complete
       const handlePublicDownloadComplete = () => {
@@ -449,6 +496,8 @@ function Settings() {
 
       return () => {
         window.electron.offLocalRefreshProgress?.();
+        window.electron.offLocalRefreshComplete?.();
+        window.electron.offLocalRefreshError?.();
         window.electron.offPublicIndexDownloadComplete?.();
       };
     }
@@ -499,6 +548,26 @@ function Settings() {
       }
     };
     checkSubscription();
+  }, []);
+
+  // Fetch index info from API
+  useEffect(() => {
+    const fetchIndexInfo = async () => {
+      try {
+        const infoResponse = await fetch("https://api.ascendara.app/localindex/info");
+        const infoData = await infoResponse.json();
+        if (infoData.success) {
+          setIndexInfo({
+            gameCount: infoData.gameCount,
+            date: infoData.date,
+            size: infoData.size,
+          });
+        }
+      } catch (error) {
+        console.error("Failed to fetch index info:", error);
+      }
+    };
+    fetchIndexInfo();
   }, []);
 
   useEffect(() => {
@@ -642,6 +711,20 @@ function Settings() {
       setIsLoading(false);
     }
   }, [settings]); // Simmplify dependencies
+
+  // Load qBittorrent install note dismissal state
+  useEffect(() => {
+    const dismissed = localStorage.getItem('hideQbitInstallNote');
+    if (dismissed === 'true') {
+      setHideQbitInstallNote(true);
+    }
+  }, []);
+
+  // Save qBittorrent install note dismissal state
+  const handleDismissQbitInstallNote = () => {
+    localStorage.setItem('hideQbitInstallNote', 'true');
+    setHideQbitInstallNote(true);
+  };
 
   const handleSettingChange = useCallback(
     async (key, value, ludusavi = false) => {
@@ -1124,18 +1207,33 @@ function Settings() {
 
   // Handle scrollTo from navigation state (from global search)
   useEffect(() => {
-    if (location.state?.scrollTo && !isLoading) {
+    if ((location.state?.scrollTo || location.state?.scrollToBottom) && !isLoading) {
       const scrollToId = location.state.scrollTo;
+      const scrollToBottom = !!location.state.scrollToBottom;
 
       // Small delay to ensure DOM is ready
       setTimeout(() => {
-        const element = document.getElementById(scrollToId);
-        if (element) {
-          element.scrollIntoView({ behavior: "smooth", block: "center" });
-          element.classList.add("highlight-setting");
-          setTimeout(() => {
-            element.classList.remove("highlight-setting");
-          }, 4000);
+        if (scrollToBottom) {
+          // Scroll to the very bottom of the settings page (torrenting +
+          // experimental sections live there).
+          const scroller =
+            document.scrollingElement || document.documentElement;
+          window.scrollTo({
+            top: scroller.scrollHeight,
+            behavior: "smooth",
+          });
+        }
+        if (scrollToId) {
+          const element = document.getElementById(scrollToId);
+          if (element) {
+            if (!scrollToBottom) {
+              element.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+            element.classList.add("highlight-setting");
+            setTimeout(() => {
+              element.classList.remove("highlight-setting");
+            }, 4000);
+          }
         }
       }, 100);
 
@@ -1143,6 +1241,19 @@ function Settings() {
       navigate(location.pathname, { replace: true, state: {} });
     }
   }, [location.state, isLoading, navigate, location.pathname]);
+
+  // On linux, verify that ludusavi is installed
+  useEffect(() => {
+    if (!isOnLinux || !settings?.ludusavi?.enabled) return;
+    (async () => {
+      const tools = await window.electron.getInstalledTools();
+      if (!tools.includes("ludusavi")) {
+        // Fix if binary missing but toggle activated
+        handleSettingChange("enabled", false, true);
+        console.log("[Ludusavi] Binary not found on Linux, disabling in settings");
+      }
+    })();
+  }, [isOnLinux]);
 
   // Show loading state
   if (isLoading) {
@@ -1267,58 +1378,179 @@ function Settings() {
           {/* Left Column - Core Settings */}
           <div className="space-y-6 lg:col-span-8">
             {/* Local Game Index Card */}
-            <Card className="border-border p-6">
-              <div className="flex items-start justify-between">
-                <div className="flex items-start gap-4">
-                  <div className="rounded-lg bg-primary/10 p-3">
-                    {isIndexRefreshing ? (
-                      <LoaderIcon className="h-6 w-6 animate-spin text-primary" />
-                    ) : (
-                      <Database className="h-6 w-6 text-primary" />
-                    )}
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <h2 className="text-xl font-semibold text-primary">
-                        {t("settings.localIndex") || "Local Game Index"}
-                      </h2>
-                      {isIndexRefreshing && (
-                        <Badge variant="secondary" className="mb-2.5 text-xs">
-                          {t("localRefresh.statusRunning") || "Refreshing..."}
-                        </Badge>
-                      )}
+            {(() => {
+              const customMode = !!settings?.customSourcesMode;
+              const activeList = settings?.activeCustomList || null;
+              const cs = settings?.customSource || null;
+              const isCustomList = customMode && (activeList || cs?.isCustomList);
+              const sourceName = isCustomList
+                ? activeList?.name || cs?.name || t("localRefresh.noSourceSelected") || "No source selected"
+                : customMode
+                  ? cs?.name || t("localRefresh.noSourceSelected") || "No source selected"
+                  : t("localRefresh.ascendaraIndex") || "Ascendara Index";
+              const gameCount = isCustomList
+                ? activeList?.itemCount ?? cs?.gameCount ?? null
+                : customMode
+                  ? cs?.gameCount ?? cs?.gamesCount ?? null
+                  : indexInfo?.gameCount ?? null;
+              const lastSyncedMs = isCustomList
+                ? activeList?.createdAt ?? cs?.lastSynced ?? null
+                : customMode
+                  ? cs?.lastSynced ?? null
+                  : lastRefreshTime
+                    ? lastRefreshTime.getTime()
+                    : indexInfo?.date
+                      ? new Date(indexInfo.date).getTime()
+                      : null;
+              const formatLastSync = (ms) => {
+                if (!ms) return t("localRefresh.never") || "Never";
+                const d = new Date(ms);
+                const diff = Date.now() - d.getTime();
+                if (diff < 60 * 1000) return t("localRefresh.justNow") || "Just now";
+                if (diff < 60 * 60 * 1000) {
+                  const m = Math.floor(diff / (60 * 1000));
+                  return `${m} ${t("localRefresh.minutesAgo") || "min ago"}`;
+                }
+                if (diff < 24 * 60 * 60 * 1000) {
+                  const h = Math.floor(diff / (60 * 60 * 1000));
+                  return `${h} ${t("localRefresh.hoursAgo") || "h ago"}`;
+                }
+                return d.toLocaleDateString();
+              };
+              return (
+                <Card className="border-border p-6">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-4">
+                      <div className="rounded-lg bg-primary/10 p-3">
+                        {isIndexRefreshing ? (
+                          <LoaderIcon className="h-6 w-6 animate-spin text-primary" />
+                        ) : isCustomList ? (
+                          <ClipboardList className="h-6 w-6 text-primary" />
+                        ) : customMode ? (
+                          <Globe className="h-6 w-6 text-primary" />
+                        ) : (
+                          <Database className="h-6 w-6 text-primary" />
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-xl font-semibold text-primary">
+                            {t("settings.yourLocalIndex") || "Local Game Index"}
+                          </h2>
+                          {isIndexRefreshing && (
+                            <Badge variant="secondary" className="mb-2.5 text-xs">
+                              {t("localRefresh.statusRunning") || "Refreshing..."}
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="max-w-[500px] text-sm text-muted-foreground">
+                          {t("settings.localIndexDescription")}
+                        </p>
+                        <div className="flex items-center gap-2 pt-1 text-sm text-muted-foreground">
+                          <span className="font-medium text-foreground">
+                            {sourceName}
+                          </span>
+                          <span className="text-muted-foreground/60">/</span>
+                          <span>
+                            {customMode
+                              ? t("localRefresh.lastSynced") || "Last synced"
+                              : t("localRefresh.lastRefresh") || "Last refresh"}
+                            : {formatLastSync(lastSyncedMs)}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <p className="max-w-[500px] text-sm text-muted-foreground">
-                      {t("settings.localIndexDescription")}
-                    </p>
-                    <div
-                      className={`flex items-center gap-2 pt-2 text-sm ${lastRefreshTime ? "text-muted-foreground" : "font-bold text-yellow-500"}`}
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="shrink-0 gap-2 text-secondary"
+                      onClick={() => navigate("/localrefresh")}
                     >
-                      {lastRefreshTime ? (
-                        <Clock className="h-4 w-4" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4" />
-                      )}
-                      <span>
-                        {t("settings.lastIndexRefresh") || "Last refresh"}:{" "}
-                        {lastRefreshTime
-                          ? lastRefreshTime.toLocaleDateString()
-                          : t("localRefresh.never") || "Never"}
-                      </span>
+                      {isIndexRefreshing
+                        ? t("localRefresh.viewProgress") || "View Progress"
+                        : t("settings.manageIndex2")}
+                    </Button>
+                  </div>
+
+                  {/* 3-stat strip: Games / Last synced / Source-specific */}
+                  <div className="mt-6 grid grid-cols-3 gap-3">
+                    <div className="rounded-lg border border-border/50 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {t("localRefresh.games") || "Games"}
+                      </div>
+                      <div className="mt-1 text-2xl font-bold leading-none">
+                        {isIndexRefreshing && indexRefreshProgress?.processedPosts != null
+                          ? `${Number(indexRefreshProgress.processedPosts).toLocaleString()}${
+                              indexRefreshProgress.totalPosts
+                                ? ` / ${Number(indexRefreshProgress.totalPosts).toLocaleString()}`
+                                : ""
+                            }`
+                          : gameCount != null
+                            ? gameCount.toLocaleString()
+                            : "—"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border/50 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {customMode
+                          ? t("localRefresh.lastSynced") || "Last synced"
+                          : t("localRefresh.lastRefresh") || "Last refresh"}
+                      </div>
+                      <div className="mt-1 truncate text-sm font-semibold">
+                        {formatLastSync(lastSyncedMs)}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border/50 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {isCustomList
+                          ? t("localRefresh.fileLocation") || "File"
+                          : t("localRefresh.status") || "Status"}
+                      </div>
+                      <div className="mt-1 flex items-center gap-1 text-sm font-semibold">
+                        {isCustomList ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              window.electron?.showCustomListInFolder?.(
+                                activeList?.id || cs?.id
+                              )
+                            }
+                            className="inline-flex cursor-pointer items-center gap-1 text-primary hover:underline"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" />
+                            {t("localRefresh.showInFolder") || "Show in folder"}
+                          </button>
+                        ) : isIndexRefreshing ? (
+                          <span className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                            <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                            {indexRefreshProgress?.progress != null
+                              ? `${Math.min(Math.round(indexRefreshProgress.progress * 100), 100)}%`
+                              : (t("localRefresh.statusRunning") || "Refreshing...")}
+                          </span>
+                        ) : customMode ? (
+                          cs?.lastSynced ? (
+                            <span className="inline-flex items-center gap-1 text-green-600 dark:text-green-400">
+                              <CheckCircle className="h-3.5 w-3.5" />
+                              {t("localRefresh.statusCompleted") || "Synced"}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">
+                              {t("localRefresh.statusIdle") || "Not synced"}
+                            </span>
+                          )
+                        ) : settings?.usingLocalIndex ? (
+                          <span className="inline-flex items-center gap-1 text-green-600 dark:text-green-400">
+                            <Zap className="h-3.5 w-3.5" />
+                            {t("localRefresh.usingLocalIndex") || "Active"}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">
+                            {t("localRefresh.statusIdle") || "Idle"}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <Button
-                  variant="default"
-                  size="sm"
-                  className="shrink-0 gap-2 text-secondary"
-                  onClick={() => navigate("/localrefresh")}
-                >
-                  {isIndexRefreshing
-                    ? t("localRefresh.viewProgress") || "View Progress"
-                    : t("settings.manageIndex") || "Manage Index"}
-                </Button>
-              </div>
 
               {/* Index Reminder Setting */}
               <div
@@ -1366,6 +1598,8 @@ function Settings() {
                 </div>
               </div>
             </Card>
+              );
+            })()}
 
             {/* General Settings Card */}
             <Card className="border-border p-6">
@@ -2355,7 +2589,7 @@ function Settings() {
                         </Button>
                       </div>
                     </div>
-                    {isOnWindows && !settings.ludusavi.backupLocation && (
+                    {!settings.ludusavi.backupLocation && (
                       <div className="mt-2 flex items-center gap-2">
                         <AlertTriangle className="h-4 w-4 text-primary" />
                         <p className="text-sm text-primary">
@@ -2365,7 +2599,7 @@ function Settings() {
                     )}
                     <div className="mt-4 flex items-center justify-between">
                       <div
-                        className={`space-y-2 ${!isOnWindows || !settings.ludusavi.backupLocation ? "pointer-events-none opacity-50" : ""}`}
+                        className={`space-y-2 ${!settings.ludusavi.backupLocation ? "pointer-events-none opacity-50" : ""}`}
                       >
                         <Label>{t("settings.gameBackup.title")}</Label>
                         <p className="max-w-[70%] text-sm text-muted-foreground">
@@ -2382,14 +2616,6 @@ function Settings() {
                             <ExternalLink className="mb-1 ml-1 inline-block h-3 w-3" />
                           </a>
                         </p>
-                        {!isOnWindows && (
-                          <div className="flex items-center gap-2">
-                            <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                            <p className="whitespace-nowrap text-sm font-bold text-muted-foreground">
-                              {t("settings.onlyWindowsSupported2")}
-                            </p>
-                          </div>
-                        )}
                       </div>
                       <Switch
                         checked={settings.ludusavi.enabled}
@@ -2397,13 +2623,13 @@ function Settings() {
                           handleToggleLudusavi(value);
                           analytics.trackFeatureUsage("gameBackups", { enabled: value });
                         }}
-                        disabled={!isOnWindows || !settings.ludusavi.backupLocation}
+                        disabled={!settings.ludusavi.backupLocation}
                       />
                     </div>
                   </div>
                 </div>
                 <div
-                  className={`mt-6 space-y-6 ${!isOnWindows || !settings.ludusavi.enabled ? "pointer-events-none opacity-50" : ""}`}
+                  className={`mt-6 space-y-6 ${!settings.ludusavi.enabled ? "pointer-events-none opacity-50" : ""}`}
                 >
                   <div className="mt-4 flex items-center justify-between">
                     <div className="space-y-2">
@@ -2426,7 +2652,6 @@ function Settings() {
                           },
                         }));
                       }}
-                      disabled={!isOnWindows}
                     />
                   </div>
                   <div className="space-y-4">
@@ -2788,7 +3013,8 @@ function Settings() {
                       {t("settings.linuxCompat.umu.sectionTitle")}
                     </h4>
                     <p className="text-xs text-muted-foreground">
-                      {t("settings.linuxCompat.umu.sectionDescription")}
+                      UMU-Launcher runs games through Steam's Linux Runtime container and applies
+                      Protonfixes automatically. UMU-Proton is the recommended Proton build.
                     </p>
 
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -2798,16 +3024,16 @@ function Settings() {
                           <span className="text-sm font-medium">{t("settings.linuxCompat.umu.launcher.title")}</span>
                           {umuInstalled ? (
                             <span className="flex items-center gap-1 rounded bg-green-500/20 px-2 py-0.5 text-xs font-semibold text-green-600">
-                              <FileCheck2 className="h-3 w-3" /> {t("settings.linuxCompat.umu.launcher.installed")}
+                              <FileCheck2 className="h-3 w-3" /> Installed
                             </span>
                           ) : (
                             <span className="flex items-center gap-1 rounded bg-red-500/20 px-2 py-0.5 text-xs font-semibold text-red-500">
-                              <AlertTriangle className="h-3 w-3" /> {t("settings.linuxCompat.umu.launcher.missing")}
+                              <AlertTriangle className="h-3 w-3" /> Missing
                             </span>
                           )}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                          {t("settings.linuxCompat.umu.launcher.description")}
+                          Required to launch games without Steam via the Sniper runtime.
                         </p>
                         <div className="flex items-center gap-2">
                           <Button
@@ -2831,11 +3057,11 @@ function Settings() {
                             }}
                           >
                             {isDownloadingUmuLauncher ? (
-                              <><Loader className="h-3 w-3 animate-spin" /> {t("settings.linuxCompat.umu.launcher.installing")}</>
+                              <><Loader className="h-3 w-3 animate-spin" /> Installing...</>
                             ) : umuInstalled ? (
-                              <><RefreshCw className="h-3 w-3" /> {t("settings.linuxCompat.umu.launcher.reinstallUpdate")}</>
+                              <><RefreshCw className="h-3 w-3" /> Reinstall/Update</>
                             ) : (
-                              <><Download className="h-3 w-3" /> {t("settings.linuxCompat.umu.launcher.install")}</>
+                              <><Download className="h-3 w-3" /> Install</>
                             )}
                           </Button>
                           <button
@@ -2857,17 +3083,17 @@ function Settings() {
                             </span>
                           ) : umuProtonInfo?.updateAvailable ? (
                             <span className="flex items-center gap-1 rounded bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-500">
-                              <FolderSync className="h-3 w-3" /> {t("settings.linuxCompat.umu.proton.updateAvailable")}
+                              <FolderSync className="h-3 w-3" /> Update available
                             </span>
                           ) : (
                             <span className="flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
-                              {t("settings.linuxCompat.umu.proton.notInstalled")}
+                              Not installed
                             </span>
                           )}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                          {t("settings.linuxCompat.umu.proton.description")}
-                          {umuProtonInfo?.sizeFormatted && ` ${t("settings.linuxCompat.umu.proton.latestInfo", { name: umuProtonInfo.name, size: umuProtonInfo.sizeFormatted })}`}
+                          Recommended Proton build with built-in Protonfixes support.
+                          {umuProtonInfo?.sizeFormatted && ` Latest: ${umuProtonInfo.name} (${umuProtonInfo.sizeFormatted})`}
                         </p>
                         <div className="flex items-center gap-2">
                           <Button
@@ -2895,13 +3121,13 @@ function Settings() {
                             }}
                           >
                             {isDownloadingUmuProton ? (
-                              <><Loader className="h-3 w-3 animate-spin" /> {t("settings.linuxCompat.umu.proton.installing")}</>
+                              <><Loader className="h-3 w-3 animate-spin" /> Installing...</>
                             ) : umuProtonInfo?.alreadyInstalled ? (
-                              <><FolderSync className="h-3 w-3" /> {t("settings.linuxCompat.umu.proton.reinstall")}</>
+                              <><FolderSync className="h-3 w-3" /> Reinstall</>
                             ) : umuProtonInfo?.updateAvailable ? (
-                              <><Download className="h-3 w-3" /> {t("settings.linuxCompat.umu.proton.update")}</>
+                              <><Download className="h-3 w-3" /> Update</>
                             ) : (
-                              <><Download className="h-3 w-3" /> {t("settings.linuxCompat.umu.proton.install")}</>
+                              <><Download className="h-3 w-3" /> Install</>
                             )}
                           </Button>
                           <Button
@@ -2927,28 +3153,29 @@ function Settings() {
                             ) : (
                               <FolderSync className="h-3 w-3" />
                             )}
-                            {t("settings.linuxCompat.umu.proton.check")}
+                            Check
                           </Button>
                         </div>
 
                         {umuProtonUpdateStatus === "up-to-date" && (
                           <p className="text-xs text-green-500 flex items-center gap-1">
-                            <FileCheck2 className="h-3 w-3" /> {t("settings.linuxCompat.umu.proton.upToDate")}
+                            <FileCheck2 className="h-3 w-3" /> Up to date
                           </p>
                         )}
                         {umuProtonUpdateStatus === "update-available" && (
                           <p className="text-xs text-blue-500 flex items-center gap-1">
-                            <AlertTriangle className="h-3 w-3" /> {t("settings.linuxCompat.umu.proton.updateAvailableVersion", { version: umuProtonInfo?.latestVersion })}
+                            <AlertTriangle className="h-3 w-3" /> Update available: {umuProtonInfo?.latestVersion}
                           </p>
                         )}
                       </div>
                     </div>
 
+                    {/* Warning si UMU pas installé */}
                     {!umuInstalled && (
                       <div className="flex items-start gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3">
                         <AlertTriangle className="h-4 w-4 text-yellow-500 mt-0.5 shrink-0" />
                         <p className="text-xs text-yellow-600 dark:text-yellow-400">
-                          {t("settings.linuxCompat.umu.warning")}
+                          UMU Launcher is not installed. Games may crash without it. Install it above to enable automatic dependency fixes via Protonfixes.
                         </p>
                       </div>
                     )}
@@ -3221,61 +3448,290 @@ function Settings() {
                     {t("settings.torrentingDescription")}
                   </p>
                 </div>
-              </div>
-
-              <div className="space-y-6">
-                {/* Torrent Support */}
-                <div className="rounded-lg border bg-card">
-                  <div className="p-6">
-                    <div className="flex items-start justify-between">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-lg font-semibold">
-                            {t("settings.torrentOnAscendara")}
-                          </h3>
-                          <Badge variant="secondary" className="text-xs">
-                            <FlaskConical className="mr-1 h-4 w-4" />
-                            {t("settings.experimental")}
-                          </Badge>
-                        </div>
-                        <p className="max-w-[600px] text-sm text-muted-foreground">
-                          {t("settings.torrentDescription")}
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div>
+                        <Switch
+                          checked={settings.torrentEnabled}
+                          onCheckedChange={handleTorrentToggle}
+                          disabled={
+                            !isOnWindows ||
+                            (settings.customSourcesMode &&
+                              settings.customSource?.torrentOnly &&
+                              settings.torrentEnabled)
+                          }
+                        />
+                      </div>
+                    </TooltipTrigger>
+                    {!isOnWindows ? (
+                      <TooltipContent>
+                        <p className="text-secondary">
+                          {t("settings.onlyWindowsSupported")}
                         </p>
-                      </div>
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <div>
-                              <Switch
-                                checked={settings.torrentEnabled}
-                                onCheckedChange={handleTorrentToggle}
-                                disabled={!isOnWindows}
-                              />
-                            </div>
-                          </TooltipTrigger>
-                          {!isOnWindows && (
-                            <TooltipContent>
-                              <p className="text-secondary">
-                                {t("settings.onlyWindowsSupported")}
-                              </p>
-                            </TooltipContent>
-                          )}
-                        </Tooltip>
-                      </TooltipProvider>
-                    </div>
-
-                    {settings.torrentEnabled && (
-                      <div className="mt-6">
-                        <div className="rounded-lg bg-muted/30 p-4">
-                          <div className="flex items-center gap-2 text-sm">
-                            <QbittorrentStatus />
-                          </div>
-                        </div>
-                      </div>
+                      </TooltipContent>
+                    ) : settings.customSourcesMode &&
+                      settings.customSource?.torrentOnly &&
+                      settings.torrentEnabled ? (
+                      <TooltipContent>
+                        <p className="text-secondary">
+                          {t("settings.torrentRequiredBySource") ||
+                            "Your selected external source requires torrenting."}
+                        </p>
+                      </TooltipContent>
+                    ) : null}
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              {settings.customSourcesMode &&
+                settings.customSource?.torrentOnly &&
+                settings.torrentEnabled && (
+                  <div className="mb-4 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs text-orange-700 dark:text-orange-300">
+                    {(t("settings.torrentLockedBySourceNote") ||
+                      "Torrenting can't be disabled while {{name}} is selected — it only publishes magnet links. Change the external source in Local Refresh first."
+                    ).replace(
+                      "{{name}}",
+                      settings.customSource?.name || "this external source"
                     )}
                   </div>
+                )}
+
+              <div className="space-y-6">
+                  {/* qBittorrent Status */}
+                  <div className={`rounded-lg p-4 ${settings.torrentEnabled ? 'bg-muted/30' : 'bg-muted/20'}`}>
+                    <div className="flex items-center gap-2 text-sm">
+                      {settings.torrentEnabled ? (
+                        <QbittorrentStatus refreshKey={qbitStatusRefreshKey} />
+                      ) : (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Badge className="h-2 w-2 rounded-full bg-gray-400" />
+                          <span>{t("app.qbittorrent.inactive")}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* qBittorrent Installation */}
+                  {settings.torrentEnabled && !hideQbitInstallNote && (
+                    <div className="rounded-lg border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/50">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-3 flex-1">
+                          <Download className="h-5 w-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
+                          <div className="space-y-2">
+                            <h4 className="font-semibold text-amber-900 dark:text-amber-100">
+                              {t("settings.qbitInstall.title")}
+                            </h4>
+                            <p className="text-sm text-amber-800 dark:text-amber-200">
+                              {t("settings.qbitInstall.description")}
+                            </p>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="mt-2 border-amber-300 bg-amber-100 text-amber-900 hover:bg-amber-200 dark:border-amber-700 dark:bg-amber-900 dark:text-amber-100 dark:hover:bg-amber-800"
+                              onClick={() => window.electron.openURL("https://www.qbittorrent.org/download")}
+                            >
+                              <ExternalLink className="h-4 w-4 mr-2" />
+                              {t("settings.qbitInstall.downloadButton")}
+                            </Button>
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6 rounded-full hover:bg-amber-200/50 dark:hover:bg-amber-800/50"
+                          onClick={handleDismissQbitInstallNote}
+                        >
+                          <X className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* qBittorrent Configuration */}
+                  <div className={`space-y-4 ${!settings.torrentEnabled ? 'opacity-50 pointer-events-none' : ''}`}>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-lg font-semibold">
+                        {t("settings.qbitConfig.title")}
+                      </h3>
+                      {!settings.torrentEnabled && (
+                        <Badge variant="secondary" className="text-xs">
+                          {t("common.disabled")}
+                        </Badge>
+                      )}
+                    </div>
+                    <p className={`text-sm ${!settings.torrentEnabled ? 'text-muted-foreground/60' : 'text-muted-foreground'}`}>
+                      {t("settings.qbitConfig.description")}
+                    </p>
+
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label htmlFor="qbit-host" className={!settings.torrentEnabled ? 'text-muted-foreground/60' : ''}>
+                          {t("settings.qbitConfig.host")}
+                        </Label>
+                        <Input
+                          id="qbit-host"
+                          type="text"
+                          placeholder="localhost"
+                          disabled={!settings.torrentEnabled}
+                          value={
+                            qbitConfigDraft?.host ??
+                            settings.torrentHost ??
+                            "localhost"
+                          }
+                          onChange={e =>
+                            setQbitConfigDraft(prev => ({
+                              ...(prev || {
+                                host: settings.torrentHost ?? "localhost",
+                                port: settings.torrentPort ?? 8080,
+                                username: settings.torrentUsername ?? "admin",
+                                password: settings.torrentPassword ?? "adminadmin",
+                              }),
+                              host: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="qbit-port" className={!settings.torrentEnabled ? 'text-muted-foreground/60' : ''}>
+                          {t("settings.qbitConfig.port")}
+                        </Label>
+                        <Input
+                          id="qbit-port"
+                          type="number"
+                          min={1}
+                          max={65535}
+                          placeholder="8080"
+                          disabled={!settings.torrentEnabled}
+                          value={
+                            qbitConfigDraft?.port ??
+                            settings.torrentPort ??
+                            8080
+                          }
+                          onChange={e =>
+                            setQbitConfigDraft(prev => ({
+                              ...(prev || {
+                                host: settings.torrentHost ?? "localhost",
+                                port: settings.torrentPort ?? 8080,
+                                username: settings.torrentUsername ?? "admin",
+                                password: settings.torrentPassword ?? "adminadmin",
+                              }),
+                              port: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="qbit-username" className={!settings.torrentEnabled ? 'text-muted-foreground/60' : ''}>
+                          {t("settings.qbitConfig.username")}
+                        </Label>
+                        <Input
+                          id="qbit-username"
+                          type="text"
+                          autoComplete="off"
+                          placeholder="admin"
+                          disabled={!settings.torrentEnabled}
+                          value={
+                            qbitConfigDraft?.username ??
+                            settings.torrentUsername ??
+                            "admin"
+                          }
+                          onChange={e =>
+                            setQbitConfigDraft(prev => ({
+                              ...(prev || {
+                                host: settings.torrentHost ?? "localhost",
+                                port: settings.torrentPort ?? 8080,
+                                username: settings.torrentUsername ?? "admin",
+                                password: settings.torrentPassword ?? "adminadmin",
+                              }),
+                              username: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="qbit-password" className={!settings.torrentEnabled ? 'text-muted-foreground/60' : ''}>
+                          {t("settings.qbitConfig.password")}
+                        </Label>
+                        <Input
+                          id="qbit-password"
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder="adminadmin"
+                          disabled={!settings.torrentEnabled}
+                          value={
+                            qbitConfigDraft?.password ??
+                            settings.torrentPassword ??
+                            "adminadmin"
+                          }
+                          onChange={e =>
+                            setQbitConfigDraft(prev => ({
+                              ...(prev || {
+                                host: settings.torrentHost ?? "localhost",
+                                port: settings.torrentPort ?? 8080,
+                                username: settings.torrentUsername ?? "admin",
+                                password: settings.torrentPassword ?? "adminadmin",
+                              }),
+                              password: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-primary"
+                        disabled={!qbitConfigDraft || !settings.torrentEnabled}
+                        onClick={() => setQbitConfigDraft(null)}
+                      >
+                        {t("common.cancel")}
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="text-muted"
+                        disabled={!qbitConfigDraft || !settings.torrentEnabled}
+                        onClick={() => {
+                          const draft = qbitConfigDraft;
+                          if (!draft) return;
+                          const portNum = parseInt(draft.port, 10);
+                          if (!draft.host || draft.host.trim() === "") {
+                            toast.error(t("settings.qbitConfig.errors.host"));
+                            return;
+                          }
+                          if (
+                            isNaN(portNum) ||
+                            portNum < 1 ||
+                            portNum > 65535
+                          ) {
+                            toast.error(t("settings.qbitConfig.errors.port"));
+                            return;
+                          }
+                          setSettings(s => ({
+                            ...s,
+                            torrentHost: draft.host.trim(),
+                            torrentPort: portNum,
+                            torrentUsername:
+                              (draft.username ?? "").trim() || "admin",
+                            torrentPassword:
+                              draft.password ?? "adminadmin",
+                          }));
+                          setQbitConfigDraft(null);
+                          setQbitStatusRefreshKey(k => k + 1);
+                          toast.success(
+                            t("settings.qbitConfig.saved")
+                          );
+                        }}
+                      >
+                        {t("settings.qbitConfig.save")}
+                      </Button>
+                    </div>
+                  </div>
                 </div>
-              </div>
             </Card>
           </div>
 
@@ -3973,7 +4429,7 @@ function Settings() {
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                window.electron?.openURL("https://ascendara.app/ascend");
+                window.electron?.openURL("https://ascendara.app/ascend?ref=app");
                 setShowAscendPromoDialog(false);
               }}
             >
@@ -5057,8 +5513,9 @@ function Settings() {
   );
 }
 
-const QbittorrentStatus = () => {
+const QbittorrentStatus = ({ refreshKey = 0 } = {}) => {
   const { t } = useLanguage();
+  const { settings } = useSettings();
   const [checking, setChecking] = useState(false);
   const [status, setStatus] = useState({ checking: true });
   const [showConfigAlert, setShowConfigAlert] = useState(false);
@@ -5080,7 +5537,7 @@ const QbittorrentStatus = () => {
     checkStatus();
     const interval = setInterval(checkStatus, 30000);
     return () => clearInterval(interval);
-  }, [checkStatus]);
+  }, [checkStatus, refreshKey]);
 
   return (
     <div className="flex w-full items-center justify-between">
@@ -5132,7 +5589,16 @@ const QbittorrentStatus = () => {
               {t("app.qbittorrent.configRequired")}
             </AlertDialogTitle>
             <AlertDialogDescription className="space-y-4 text-muted-foreground">
-              {t("app.qbittorrent.configInstructions")}
+              <div className="rounded-lg bg-muted p-4">
+                <h4 className="font-semibold mb-2">{t("settings.qbitConfigDialog.currentConfig")}</h4>
+                <div className="space-y-2 text-sm">
+                  <div><span className="font-medium">{t("settings.qbitConfigDialog.host")}:</span> {settings.torrentHost || "localhost"}</div>
+                  <div><span className="font-medium">{t("settings.qbitConfigDialog.port")}:</span> {settings.torrentPort || 8080}</div>
+                  <div><span className="font-medium">{t("settings.qbitConfigDialog.username")}:</span> {settings.torrentUsername || "admin"}</div>
+                  <div><span className="font-medium">{t("settings.qbitConfigDialog.password")}:</span> {settings.torrentPassword || "adminadmin"}</div>
+                </div>
+              </div>
+              <p>{t("app.qbittorrent.configInstructions")}</p>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

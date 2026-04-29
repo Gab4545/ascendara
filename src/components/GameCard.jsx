@@ -48,6 +48,7 @@ import installedGamesService from "@/services/installedGamesService";
 import { analytics } from "@/services/analyticsService";
 import { useImageLoader } from "@/hooks/useImageLoader";
 import verifiedGamesService from "@/services/verifiedGamesService";
+import { SEAMLESS_PROVIDERS, TORBOX_PROVIDERS, TORBOX_ELIGIBLE_SEAMLESS } from "@/config/providers";
 
 const GameCard = memo(function GameCard({ game, compact }) {
   const navigate = useNavigate();
@@ -58,7 +59,9 @@ const GameCard = memo(function GameCard({ game, compact }) {
   const { cachedImage, loading, error } = useImageLoader(game?.imgID, {
     quality: isVisible ? "high" : "low",
     priority: isVisible ? "high" : "low",
-    enabled: !!game?.imgID,
+    enabled: !!game?.imgID || (!game?.imgID && !!game?.game),
+    fallbackGameName: !game?.imgID ? game?.game : null,
+    fallbackSlot: "card",
   });
   const [isInstalled, setIsInstalled] = useState(false);
   const [needsUpdate, setNeedsUpdate] = useState(false);
@@ -538,8 +541,8 @@ const GameCard = memo(function GameCard({ game, compact }) {
                   ? "installed"
                   : "download";
 
-            const seamlessHosts = ["gofile", "buzzheavier", "pixeldrain"];
-            const torboxHosts = ["1fichier", "datanodes", "qiwi", "megadb"];
+            const seamlessHosts = SEAMLESS_PROVIDERS;
+            const torboxHosts = TORBOX_PROVIDERS;
             const prioritizedTorbox = settings.prioritizeTorboxOverSeamless;
             const downloadLinks = game.download_links || {};
             const allHosts = Object.keys(downloadLinks);
@@ -559,7 +562,7 @@ const GameCard = memo(function GameCard({ game, compact }) {
             let provider = "default";
             if (
               prioritizedTorbox &&
-              ["gofile", "buzzheavier", "datanodes", "pixeldrain"].includes(host)
+              TORBOX_ELIGIBLE_SEAMLESS.includes(host)
             ) {
               provider = "torbox";
             } else if (seamlessHosts.includes(host)) {

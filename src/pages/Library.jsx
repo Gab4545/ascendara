@@ -71,6 +71,7 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import gameService from "@/services/gameService";
+import { safeSetItem } from "@/services/gameInfoCacheService";
 import { toast } from "sonner";
 import { useLocation, useNavigate } from "react-router-dom";
 import steamService from "@/services/gameInfoService";
@@ -190,7 +191,7 @@ const Library = () => {
   });
 
   useEffect(() => {
-    localStorage.setItem("game-favorites", JSON.stringify(favorites));
+    safeSetItem("game-favorites", JSON.stringify(favorites));
   }, [favorites]);
 
   useLibrarySearch();
@@ -293,7 +294,7 @@ const Library = () => {
 
   // Save sortOrder to localStorage whenever it changes
   useEffect(() => {
-    localStorage.setItem("library-sortOrder", sortOrder);
+    safeSetItem("library-sortOrder", sortOrder);
   }, [sortOrder]);
 
   // Pagination logic
@@ -456,7 +457,7 @@ const Library = () => {
   // Handle removing a game from Play Later list
   const handleRemoveFromPlayLater = gameName => {
     const updatedList = playLaterGames.filter(g => g.game !== gameName);
-    localStorage.setItem("play-later-games", JSON.stringify(updatedList));
+    safeSetItem("play-later-games", JSON.stringify(updatedList));
     localStorage.removeItem(`play-later-image-${gameName}`);
     setPlayLaterGames(updatedList);
   };
@@ -663,7 +664,7 @@ const Library = () => {
         favorite: cloudGame.favorite,
         isCustom: true,
       };
-      localStorage.setItem(
+      safeSetItem(
         `cloud-restore-${cloudGame.name}`,
         JSON.stringify(cloudRestoreData)
       );
@@ -697,7 +698,7 @@ const Library = () => {
         lastPlayed: cloudGame.lastPlayed,
         favorite: cloudGame.favorite,
       };
-      localStorage.setItem(
+      safeSetItem(
         `cloud-restore-${cloudGame.name}`,
         JSON.stringify(cloudRestoreData)
       );
@@ -998,8 +999,8 @@ const Library = () => {
       if (allGameTitles.length === 0) {
         const emptyResult = { totalValue: 0, games: [], notFound: [] };
         setLibraryValueData(emptyResult);
-        localStorage.setItem("library-value-cache", JSON.stringify(emptyResult));
-        localStorage.setItem("library-value-game-count", "0");
+        safeSetItem("library-value-cache", JSON.stringify(emptyResult));
+        safeSetItem("library-value-game-count", "0");
         setCachedGameCount(0);
         setIsCalculatingValue(false);
         return;
@@ -1016,8 +1017,8 @@ const Library = () => {
 
       // Cache the result
       setLibraryValueData(result);
-      localStorage.setItem("library-value-cache", JSON.stringify(result));
-      localStorage.setItem("library-value-game-count", String(allGameTitles.length));
+      safeSetItem("library-value-cache", JSON.stringify(result));
+      safeSetItem("library-value-game-count", String(allGameTitles.length));
       setCachedGameCount(allGameTitles.length);
     } catch (error) {
       console.error("Error calculating library value:", error);
@@ -2980,30 +2981,24 @@ const PlayLaterGameCard = memo(({ game, onDownload, onRemove }) => {
         return;
       }
 
-      // Fallback to API if no cached image
-      if (game.imgID) {
+      // Try SteamGridDB fallback if no cached image exists
+      if (game.game && !game.imgID) {
         try {
-          const response = await fetch(
-            `https://api.ascendara.app/v2/image/${game.imgID}`
-          );
-          if (response.ok && isMounted) {
-            const blob = await response.blob();
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              if (isMounted) {
-                setImageData(reader.result);
-                // Cache for future use
-                try {
-                  localStorage.setItem(`play-later-image-${game.game}`, reader.result);
-                } catch (e) {
-                  console.warn("Could not cache play later image:", e);
-                }
-              }
-            };
-            reader.readAsDataURL(blob);
+          const steamGridImageService = await import("@/services/steamGridImageService");
+          const assets = await steamGridImageService.default.getAssets(game.game);
+          const imageUrl = steamGridImageService.default.pickUrl(assets, "card");
+          if (imageUrl && isMounted) {
+            setImageData(imageUrl);
+            // Cache the SteamGridDB image URL for future use
+            try {
+              localStorage.setItem(`play-later-image-${game.game}`, imageUrl);
+            } catch (e) {
+              console.warn("Could not cache SteamGridDB play later image:", e);
+            }
+            return;
           }
         } catch (error) {
-          console.error("Error loading play later game image:", error);
+          console.warn("SteamGridDB fallback failed for play later image:", error);
         }
       }
     };

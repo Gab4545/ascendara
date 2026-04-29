@@ -169,7 +169,7 @@ def launch_with_proton(exe_path, linux_config, game_launch_cmd=None):
 
     os.chmod(proton_script, 0o755)
 
-    env = os.environ.copy()
+    env = _clean_pyinstaller_env(os.environ.copy())
     env["STEAM_COMPAT_DATA_PATH"] = linux_config["compat_data"]
 
     if linux_config.get("steam_path"):
@@ -223,7 +223,7 @@ def launch_with_wine_isolated(exe_path, linux_config, game_launch_cmd=None):
     prefix_path = os.path.join(linux_config["compat_data"], "pfx")
     os.makedirs(prefix_path, exist_ok=True)
 
-    env = os.environ.copy()
+    env = _clean_pyinstaller_env(os.environ.copy())
     env["WINEPREFIX"] = prefix_path
     env["WINEDLLOVERRIDES"] = "winemenubuilder.exe=d"
 
@@ -260,10 +260,20 @@ def launch_with_wine_isolated(exe_path, linux_config, game_launch_cmd=None):
         logging.error(f"[Wine] Failed to launch: {e}", exc_info=True)
         return None
 
+def _clean_pyinstaller_env(env):
+    for var in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME'):
+        orig = env.get(var + '_ORIG')
+        if orig is not None:
+            env[var] = orig
+            del env[var + '_ORIG']
+        else:
+            env.pop(var, None)
+    return env
+
 def launch_with_umu(exe_path, linux_config, game_launch_cmd=None):
     """
     Launch a Windows executable using umu-run.
-    Equivalent to: GAMEID=umu-xxxx PROTONPATH=/path/to/proton WINEPREFIX=/path/pfx umu-run game.exe
+    Equivalent to: GAMEID=umu-xxxx PROTONPATH=/path/to/proton WINEPREFIX=/path umu-run game.exe
     """
     umu_bin = linux_config["runner_path"]  # absolute path to umu-run
 
@@ -273,10 +283,10 @@ def launch_with_umu(exe_path, linux_config, game_launch_cmd=None):
 
     os.chmod(umu_bin, 0o755)
 
-    prefix_path = os.path.join(linux_config["compat_data"], "pfx")
+    prefix_path = linux_config["compat_data"]
     os.makedirs(prefix_path, exist_ok=True)
 
-    env = os.environ.copy()
+    env = _clean_pyinstaller_env(os.environ.copy())
     env["GAMEID"] = linux_config.get("umu_id") or "umu-default"
     env["WINEPREFIX"] = prefix_path
     env["STEAM_COMPAT_DATA_PATH"] = linux_config["compat_data"]
@@ -514,8 +524,15 @@ def run_ludusavi_backup(game_name):
             base_dir = os.path.dirname(sys.executable)
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            
-        ludusavi_path = os.path.join(base_dir, "ludusavi.exe")
+
+        # Binary depending on the platform
+        if sys.platform == 'win32':
+            ludusavi_path = os.path.join(base_dir, "ludusavi.exe")
+        else:
+            # Linux : in ~/.ascendara/
+            ascendara_config = os.path.join(os.path.expanduser('~'), '.ascendara')
+            ludusavi_path = os.path.join(ascendara_config, 'ludusavi')
+
         if not os.path.exists(ludusavi_path):
             logging.error(f"Ludusavi executable not found at: {ludusavi_path}")
             logging.info("[EXIT] run_ludusavi_backup() - No executable")
@@ -523,11 +540,13 @@ def run_ludusavi_backup(game_name):
 
         # Use ludusavi redirects
 
-        # 1. Find AppData folder
+        # 1. Config dir
         if sys.platform == 'darwin':
             app_data_dir = os.path.join(os.path.expanduser('~/Library/Application Support'), 'ascendara')
         elif sys.platform == 'linux':
-            app_data_dir = os.path.join(os.path.expanduser('~/.config/ascendara'))
+            appdata = os.environ.get('APPDATA', '')
+            prod_dir = os.path.join(os.path.expanduser('~'), '.config', 'ascendara')
+            app_data_dir = prod_dir
         else:
             appdata = os.environ.get('APPDATA', '')
             prod_dir = os.path.join(appdata, 'ascendara')
@@ -541,15 +560,19 @@ def run_ludusavi_backup(game_name):
         if not os.path.exists(config_file_path):
             os.makedirs(ludusavi_config_dir, exist_ok=True)
             local_user_dir = os.path.expanduser('~')
-            cloud_user_dir = "C:\\Users\\ascendara_user" if sys.platform == 'win32' else "/home/ascendara_user"
-            
-            local_user_escaped = local_user_dir.replace('\\', '\\\\')
-            cloud_user_escaped = cloud_user_dir.replace('\\', '\\\\')
-            
+            if sys.platform == 'win32':
+                cloud_user_dir = "C:\\Users\\ascendara_user"
+                local_escaped = local_user_dir.replace('\\', '\\\\')
+                cloud_escaped = cloud_user_dir.replace('\\', '\\\\')
+            else:
+                cloud_user_dir = "/home/ascendara_user"
+                local_escaped = local_user_dir
+                cloud_escaped = cloud_user_dir
+
             yaml_content = f"""redirects:
   - kind: bidirectional
-    source: "{local_user_escaped}"
-    target: "{cloud_user_escaped}"
+    source: "{local_escaped}"
+    target: "{cloud_escaped}"
 """
             with open(config_file_path, "w", encoding="utf-8") as f:
                 f.write(yaml_content)
@@ -582,12 +605,26 @@ def run_ludusavi_backup(game_name):
             "--force"
         ])
 
-        logging.info(f"Running Ludusavi backup for {game_name} with command: {' '.join(cmd)}")
-        # Define flag to hide the window (Windows only)
-        creationflags = 0
-        if sys.platform == 'win32':
-            creationflags = subprocess.CREATE_NO_WINDOW # 0x08000000
+        # Linux : add --wine-prefix if no customSavePaths
+        if sys.platform == 'linux':
+            # verify if game has customSavePaths
+            has_custom_paths = _get_custom_save_path_for_game(
+                game_name, False, None, None
+            )
+            if not has_custom_paths:
+                # Build slug and prefix path
+                import re
+                slug = re.sub(r'[^\w\s\-().]', '', game_name).replace(' ', '_')[:100]
+                pfx_path = os.path.join(
+                    os.path.expanduser('~'), '.ascendara', 'compatdata', slug, 'pfx'
+                )
+                if os.path.exists(pfx_path):
+                    cmd.extend(["--wine-prefix", pfx_path])
+                    logging.info(f"[Ludusavi] Linux: using wine prefix at {pfx_path}")
+                else:
+                    logging.warning(f"[Ludusavi] Linux: wine prefix not found at {pfx_path}")
 
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
         if result.returncode == 0:
             logging.info(f"Ludusavi backup completed successfully for {game_name}")

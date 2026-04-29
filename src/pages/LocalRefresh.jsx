@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLanguage } from "@/context/LanguageContext";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,13 @@ import {
   ExternalLink,
   Calendar,
   PencilIcon,
+  Globe,
+  ShieldCheck,
+  Search as SearchIcon,
+  AlertTriangle,
+  ClipboardList,
+  Plug,
+  PlugIcon,
 } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -59,6 +66,20 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import RefreshIndexDialog from "@/components/RefreshIndexDialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  TooltipProvider,
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "@/components/ui/tooltip";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useSettings } from "@/context/SettingsContext";
 import { useAuth } from "@/context/AuthContext";
@@ -128,6 +149,9 @@ const LocalRefresh = () => {
   const lastCookieToastTimeRef = useRef(0);
   const cookieDialogOpenRef = useRef(false);
   const wasFirstIndexRef = useRef(false);
+  // Snapshot of the previous custom source, used to revert the selection if
+  // the user bails out of the manual-paste fallback without ingesting JSON.
+  const previousCustomSourceRef = useRef(null);
   const [checkingApi, setCheckingApi] = useState(false);
   const [apiAvailable, setApiAvailable] = useState(false);
   const [indexInfo, setIndexInfo] = useState(null); // { gameCount, date, size }
@@ -138,6 +162,54 @@ const LocalRefresh = () => {
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
   const [autoRefreshInterval, setAutoRefreshInterval] = useState("7");
   const [autoRefreshMethod, setAutoRefreshMethod] = useState("shared"); // "shared" or "manual"
+
+  // External Sources Mode (user-configurable source bucket)
+  const [customSourcesMode, setCustomSourcesMode] = useState(false);
+  const [customSource, setCustomSource] = useState(null); // { id, name, url, gamesCount, ... }
+  const [customSourceLastSynced, setCustomSourceLastSynced] = useState(null);
+  const [customSourceGameCount, setCustomSourceGameCount] = useState(null);
+  const [sourceBrowserOpen, setSourceBrowserOpen] = useState(false);
+  const [bucketSources, setBucketSources] = useState([]);
+  const [bucketSourcesLoading, setBucketSourcesLoading] = useState(false);
+  const [bucketSourcesError, setBucketSourcesError] = useState(null);
+  const [bucketSearchQuery, setBucketSearchQuery] = useState("");
+  // URL of the active source bucket. Users enter this manually; the Ascendara
+  // API decides which bucket hosts are allowed (e.g. library.hydra.wiki).
+  // `sourceBucketUrl` is the committed value (persisted, gates Browse);
+  // `sourceBucketUrlDraft` is what's in the input while the user is typing.
+  const [sourceBucketUrl, setSourceBucketUrl] = useState("");
+  const [sourceBucketUrlDraft, setSourceBucketUrlDraft] = useState("");
+  const [isSyncingCustomSource, setIsSyncingCustomSource] = useState(false);
+
+  // Manual paste fallback (triggered on 403 from upstream source)
+  const [manualPasteOpen, setManualPasteOpen] = useState(false);
+  const [manualPasteText, setManualPasteText] = useState("");
+  const [manualPasteError, setManualPasteError] = useState(null);
+  const [isIngestingManual, setIsIngestingManual] = useState(false);
+  const [manualPasteSourceUrl, setManualPasteSourceUrl] = useState(null);
+
+  // Library of sources the user has selected/synced, so they can switch back
+  // and forth without having to re-browse the bucket each time.
+  const [customSourcesLibrary, setCustomSourcesLibrary] = useState([]);
+
+  // Torrent-only source warning (shown when a synced source has no non-torrent
+  // hosts and the user hasn't enabled torrenting in Settings yet)
+  const [torrentWarningOpen, setTorrentWarningOpen] = useState(false);
+  const [torrentWarningSource, setTorrentWarningSource] = useState(null);
+
+  // JSON Import Dialog
+  const [showJsonImportDialog, setShowJsonImportDialog] = useState(false);
+  const [jsonImportText, setJsonImportText] = useState("");
+  const [jsonImportError, setJsonImportError] = useState(null);
+  const [isProcessingJson, setIsProcessingJson] = useState(false);
+  const [showJsonConfirmDialog, setShowJsonConfirmDialog] = useState(false);
+  const [jsonImportData, setJsonImportData] = useState(null); // { type, gameCount, keys, sampleGames }
+  const [jsonListName, setJsonListName] = useState(""); // For naming custom lists
+
+  // Custom Lists Management
+  const [customLists, setCustomLists] = useState([]); // Array of custom lists
+  const [activeCustomList, setActiveCustomList] = useState(null); // Currently active custom list
+  const [showListNameDialog, setShowListNameDialog] = useState(false); // Dialog for naming new lists
 
   // Load settings and ensure localIndex is set, also check if refresh is running
   useEffect(() => {
@@ -165,42 +237,83 @@ const LocalRefresh = () => {
           setAutoRefreshMethod(settings.autoRefreshMethod);
         }
 
-        // Check if localIndex is set, if not set it to default
-        let indexPath = settings?.localIndex;
-        if (!indexPath) {
+        // Load custom sources library
+        if (settings?.customSourcesLibrary) {
+          setCustomSourcesLibrary(settings.customSourcesLibrary);
+        }
+
+        // Load custom lists
+        if (settings?.customLists) {
+          setCustomLists(settings.customLists);
+        }
+
+        // Load active custom list
+        if (settings?.activeCustomList) {
+          setActiveCustomList(settings.activeCustomList);
+        }
+
+        // Load custom source mode
+        if (settings?.customSourcesMode) {
+          setCustomSourcesMode(settings.customSourcesMode);
+        }
+
+        // Load the user-configured source bucket URL (e.g. library.hydra.wiki)
+        if (typeof settings?.sourceBucketUrl === "string") {
+          setSourceBucketUrl(settings.sourceBucketUrl);
+          setSourceBucketUrlDraft(settings.sourceBucketUrl);
+        }
+
+        // Load custom source
+        if (settings?.customSource) {
+          setCustomSource(settings.customSource);
+          if (settings.customSource.lastSynced) {
+            setCustomSourceLastSynced(new Date(settings.customSource.lastSynced));
+          }
+          if (settings.customSource.gameCount) {
+            setCustomSourceGameCount(settings.customSource.gameCount);
+          }
+        }
+
+        // Load local index path
+        if (settings?.localIndexPath) {
+          setLocalIndexPath(settings.localIndexPath);
+        } else if (window.electron?.getDefaultLocalIndexPath) {
           const defaultPath = await window.electron.getDefaultLocalIndexPath();
-          await window.electron.updateSetting("localIndex", defaultPath);
           setLocalIndexPath(defaultPath);
-          indexPath = defaultPath;
-          console.log("Set default localIndex path:", defaultPath);
-        } else {
-          setLocalIndexPath(indexPath);
+          await updateSetting("localIndexPath", defaultPath);
         }
 
-        // Check if user has indexed before from timestamp
-        if (window.electron?.getTimestampValue) {
-          const hasIndexed = await window.electron.getTimestampValue("hasIndexBefore");
-          setHasIndexBefore(hasIndexed === true);
-          // Track if this is the user's first index for auto-enabling
-          wasFirstIndexRef.current = hasIndexed !== true;
+        // Load last refresh time
+        if (settings?.lastLocalIndexRefresh) {
+          setLastRefreshTime(new Date(settings.lastLocalIndexRefresh));
         }
 
-        // Load last refresh time from progress.json lastSuccessfulTimestamp
-        if (indexPath && window.electron?.getLocalRefreshProgress) {
-          try {
-            const progress = await window.electron.getLocalRefreshProgress(indexPath);
-            // Use lastSuccessfulTimestamp which persists across refresh attempts
-            if (progress?.lastSuccessfulTimestamp) {
-              setLastRefreshTime(new Date(progress.lastSuccessfulTimestamp * 1000));
+        // Resolve the index path once for status queries below
+        const resolvedIndexPath =
+          settings?.localIndexPath ||
+          (window.electron?.getDefaultLocalIndexPath
+            ? await window.electron.getDefaultLocalIndexPath()
+            : null);
+
+        // Check if refresh is running
+        if (window.electron?.isLocalIndexRefreshing) {
+          const refreshing = await window.electron.isLocalIndexRefreshing();
+          if (refreshing) {
+            try {
+              const progress = await window.electron.getLocalRefreshProgress(resolvedIndexPath);
+              // Use lastSuccessfulTimestamp which persists across refresh attempts
+              if (progress?.lastSuccessfulTimestamp) {
+                setLastRefreshTime(new Date(progress.lastSuccessfulTimestamp * 1000));
+              }
+            } catch (e) {
+              console.log("No progress file found for last refresh time");
             }
-          } catch (e) {
-            console.log("No progress file found for last refresh time");
           }
         }
 
         // Check if a refresh is currently running and restore UI state
         if (window.electron?.getLocalRefreshStatus) {
-          const status = await window.electron.getLocalRefreshStatus(indexPath);
+          const status = await window.electron.getLocalRefreshStatus(resolvedIndexPath);
           if (status.isRunning) {
             console.log("Refresh is running, restoring UI state:", status.progress);
             setIsRefreshing(true);
@@ -780,6 +893,853 @@ const LocalRefresh = () => {
   };
 
 
+  // ---------------------------------------------------------------------------
+  // External Sources Mode handlers
+  // ---------------------------------------------------------------------------
+
+  const handleToggleCustomSourcesMode = async (enabled) => {
+    setCustomSourcesMode(enabled);
+    await updateSetting("customSourcesMode", enabled);
+    // Force full reload of game data on next request
+    gameService.clearMemoryCache();
+    localStorage.removeItem("ascendara_games_cache");
+    localStorage.removeItem("local_ascendara_games_timestamp");
+    localStorage.removeItem("local_ascendara_metadata_cache");
+    if (enabled) {
+      // Ensure usingLocalIndex reflects that we're NOT using the official local index
+      await updateSetting("usingLocalIndex", false);
+      toast.info(
+        t("localRefresh.customModeEnabled") ||
+          "External sources enabled. Set a source bucket URL to begin."
+      );
+    } else {
+      // Revert to using local index if one is built; app.jsx / Search.jsx will re-read
+      toast.info(
+        t("localRefresh.customModeDisabled") ||
+          "External sources disabled. Reverting to the official index."
+      );
+    }
+    // Notify other pages (Search/Library) to re-fetch games
+    window.dispatchEvent(
+      new CustomEvent("index-refreshed", { detail: { timestamp: Date.now() } })
+    );
+  };
+
+  // Fetch the list of sources for a given bucket URL.
+  const fetchBucketSources = useCallback(async (bucketUrl) => {
+    setBucketSourcesLoading(true);
+    setBucketSourcesError(null);
+    try {
+      const targetBucket = String(bucketUrl || sourceBucketUrl || "");
+      if (!targetBucket.trim()) {
+        setBucketSources([]);
+        setBucketSourcesError(
+          t("localRefresh.bucketUrlRequired") ||
+            "Enter a source bucket URL to continue."
+        );
+        return;
+      }
+
+      const url =
+        "https://api.ascendara.app/api/sources/bucket?url=" +
+        encodeURIComponent(targetBucket) +
+        "&page=1&limit=100";
+
+      let parsed;
+      let ok;
+      let status;
+      if (window.electron?.request) {
+        const res = await window.electron.request(url, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          timeout: 20000,
+        });
+        status = res.status;
+        ok = res.ok;
+        try { parsed = JSON.parse(res.data); } catch (_) { parsed = null; }
+      } else {
+        const r = await fetch(url);
+        status = r.status;
+        ok = r.ok;
+        try { parsed = await r.json(); } catch (_) { parsed = null; }
+      }
+
+      if (!ok) {
+        // 404 = URL is not a recognized bucket. Surface the server message so
+        // the UX can coach the user toward a valid bucket
+        if (status === 404) {
+          setBucketSources([]);
+          setBucketSourcesError(
+            parsed?.message ||
+              t("localRefresh.bucketUrlUnrecognized") ||
+              "This URL is not a recognized source bucket."
+          );
+          return;
+        }
+        throw new Error(parsed?.message || `HTTP ${status}`);
+      }
+
+      const sources = Array.isArray(parsed?.sources) ? parsed.sources : [];
+      setBucketSources(sources);
+    } catch (err) {
+      console.error("Failed to fetch bucket sources:", err);
+      setBucketSourcesError(err?.message || "Failed to fetch sources");
+    } finally {
+      setBucketSourcesLoading(false);
+    }
+  }, [sourceBucketUrl, t]);
+
+  const handleSaveSourceBucketUrl = async (rawUrl) => {
+    const trimmed = (rawUrl || "").trim();
+    setSourceBucketUrl(trimmed);
+    setSourceBucketUrlDraft(trimmed);
+    await updateSetting("sourceBucketUrl", trimmed);
+    if (trimmed) {
+      toast.success(
+        t("localRefresh.sourceBucketSaved") || "Source bucket saved"
+      );
+    }
+  };
+
+  const handleOpenSourceBrowser = () => {
+    // Require the user to have configured a bucket URL first. The API decides
+    // which bucket hosts are accepted; the client just forwards the URL.
+    if (!sourceBucketUrl.trim()) {
+      toast.error(
+        t("localRefresh.bucketUrlRequired") ||
+          "Enter a source bucket URL to continue."
+      );
+      return;
+    }
+    setSourceBrowserOpen(true);
+    if (!bucketSourcesLoading) {
+      fetchBucketSources(sourceBucketUrl);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Library / torrent helpers
+  // ---------------------------------------------------------------------------
+
+  // Merge a source entry into the persisted library (dedupe by URL) and save.
+  const upsertLibraryEntry = useCallback(async (entry) => {
+    if (!entry?.url) return [];
+    let next = [];
+    setCustomSourcesLibrary((prev) => {
+      const filtered = (prev || []).filter((s) => s?.url !== entry.url);
+      next = [entry, ...filtered].slice(0, 20); // cap at 20 saved sources
+      return next;
+    });
+    await updateSetting("customSourcesLibrary", next);
+    return next;
+  }, [updateSetting]);
+
+  const removeLibraryEntry = useCallback(async (url) => {
+    if (!url) return;
+    let next = [];
+    setCustomSourcesLibrary((prev) => {
+      next = (prev || []).filter((s) => s?.url !== url);
+      return next;
+    });
+    await updateSetting("customSourcesLibrary", next);
+  }, [updateSetting]);
+
+  // Check source metadata (topDownloadOption) to see if the upstream
+  // only advertises torrent links. This is the authoritative signal when
+  // browsing sources, because it doesn't require syncing first.
+  const isSourceMetaTorrentOnly = (source) => {
+    const opts = Array.isArray(source?.topDownloadOption)
+      ? source.topDownloadOption
+      : null;
+    if (!opts || opts.length === 0) return false;
+    return opts.every(
+      (o) => String(o?.name || "").toLowerCase() === "torrent"
+    );
+  };
+
+  // Inspect a mapped dataset to determine whether it's torrent-only.
+  // Bucket sources map magnet links to download_links.torrent, and most DDL hosts
+  // produce non-torrent keys (gofile, buzzheavier, 1fichier, etc.).
+  const isTorrentOnlyDataset = (games) => {
+    if (!Array.isArray(games) || games.length === 0) return false;
+    let sampled = 0;
+    let nonTorrent = 0;
+    for (const g of games) {
+      const links = g?.download_links;
+      if (!links || typeof links !== "object") continue;
+      sampled++;
+      const keys = Object.keys(links).filter((k) => (links[k] || []).length > 0);
+      if (keys.some((k) => k !== "torrent")) nonTorrent++;
+      if (sampled >= 50) break; // sampling is enough
+    }
+    if (sampled === 0) return false;
+    return nonTorrent === 0;
+  };
+
+  const maybeWarnTorrentOnly = async (source, games) => {
+    try {
+      const torrentOnly =
+        isSourceMetaTorrentOnly(source) || isTorrentOnlyDataset(games);
+      if (!torrentOnly) return;
+      const current = await window.electron.getSettings();
+      if (current?.torrentEnabled) return;
+      setTorrentWarningSource({ ...source, torrentOnly: true });
+      setTorrentWarningOpen(true);
+      // Mark the source so the UI can decorate it later
+      await upsertLibraryEntry({
+        ...source,
+        torrentOnly: true,
+        lastUsed: Date.now(),
+      });
+    } catch (e) {
+      console.warn("[LocalRefresh] torrent-only check failed:", e);
+    }
+  };
+
+  const handleSelectCustomSource = async (source) => {
+    if (!source?.url) return;
+
+    const payload = {
+      id: source.id,
+      name: source.title || source.name || "Custom Source",
+      url: source.url,
+      gamesCount: source.gamesCount || null,
+      description: source.description || "",
+      status: Array.isArray(source.status) ? source.status : [],
+      rating: source.rating || null,
+      addedDate: source.addedDate || null,
+      topDownloadOption: Array.isArray(source.topDownloadOption)
+        ? source.topDownloadOption
+        : null,
+      torrentOnly: isSourceMetaTorrentOnly(source) || undefined,
+    };
+    payload.lastUsed = Date.now();
+
+    // Hard-block torrent-only sources when torrenting is disabled. We show
+    // the warning dialog (which links to Settings) but do NOT commit the
+    // selection -- the user has to enable torrenting first.
+    if (isSourceMetaTorrentOnly(payload)) {
+      try {
+        const current = await window.electron.getSettings();
+        if (!current?.torrentEnabled) {
+          setTorrentWarningSource({ ...payload, torrentOnly: true, blocked: true });
+          setTorrentWarningOpen(true);
+          return;
+        }
+      } catch (e) {
+        console.warn("[LocalRefresh] torrent pre-check failed:", e);
+      }
+    }
+
+    // Clear active custom list when picking a regular external source.
+    if (activeCustomList) {
+      setActiveCustomList(null);
+      await updateSetting("activeCustomList", null);
+    }
+
+    // Snapshot the previously-active source so we can revert if the user
+    // cancels out of the manual-paste fallback without ingesting anything.
+    previousCustomSourceRef.current = customSource;
+    setCustomSource(payload);
+    setCustomSourceLastSynced(null);
+    setCustomSourceGameCount(null);
+    await updateSetting("customSource", payload);
+    await upsertLibraryEntry(payload);
+    setSourceBrowserOpen(false);
+    toast.success(
+      (t("localRefresh.customSourceSelected") || "Selected custom source") +
+        ": " +
+        payload.name
+    );
+    // Immediately sync the source after selection
+    await handleSyncCustomSource(payload);
+  };
+
+  // Switch the active source to a previously-saved library entry. Reuses the
+  // cached mapped data if fresh (<12h), otherwise refetches.
+  const handleSwitchToSavedSource = async (entry) => {
+    if (!entry?.url) return;
+    const now = Date.now();
+    const payload = { ...entry, lastUsed: now };
+    
+    // Clear active custom list when switching to a regular external source.
+    if (activeCustomList) {
+      setActiveCustomList(null);
+      await updateSetting("activeCustomList", null);
+    }
+    
+    setCustomSource(payload);
+    setCustomSourceLastSynced(
+      entry.lastSynced ? new Date(entry.lastSynced) : null
+    );
+    setCustomSourceGameCount(
+      typeof entry.gameCount === "number" ? entry.gameCount : null
+    );
+    await updateSetting("customSource", payload);
+    await upsertLibraryEntry(payload);
+    
+    // Clear all caches to force reload with new data
+    gameService.clearMemoryCache();
+    localStorage.removeItem("ascendara_games_cache");
+    localStorage.removeItem("local_ascendara_games_timestamp");
+    localStorage.removeItem("local_ascendara_metadata_cache");
+    localStorage.removeItem("local_ascendara_last_updated");
+    
+    window.dispatchEvent(
+      new CustomEvent("index-refreshed", { detail: { timestamp: now } })
+    );
+    toast.success(
+      (t("localRefresh.customSourceSwitched") || "Switched source") +
+        ": " +
+        payload.name
+    );
+  };
+
+  const handleSyncCustomSource = async (sourceOverride) => {
+    const source = sourceOverride || customSource;
+    if (!source?.url) {
+      toast.error(
+        t("localRefresh.customSourceNone") || "No custom source selected"
+      );
+      return;
+    }
+    if (isSyncingCustomSource) return;
+    setIsSyncingCustomSource(true);
+    try {
+      const data = await gameService.refreshCustomSource();
+      const count = data?.games?.length || 0;
+      const now = Date.now();
+      setCustomSourceLastSynced(new Date(now));
+      setCustomSourceGameCount(count);
+      const nextPayload = {
+        ...source,
+        lastSynced: now,
+        lastUsed: now,
+        gameCount: count,
+      };
+      setCustomSource(nextPayload);
+      await updateSetting("customSource", nextPayload);
+      // Save to library so the user can swap back to it later
+      await upsertLibraryEntry(nextPayload);
+      // Also flip hasIndexBefore so gating UI treats this as "ready"
+      if (window.electron?.setTimestampValue) {
+        await window.electron.setTimestampValue("hasIndexBefore", true);
+        setHasIndexBefore(true);
+      }
+      toast.success(
+        (t("localRefresh.customSourceSynced") || "Custom source synced") +
+          ` (${count.toLocaleString()} ${t("localRefresh.games") || "games"})`
+      );
+      // Notify other pages
+      window.dispatchEvent(
+        new CustomEvent("index-refreshed", { detail: { timestamp: now } })
+      );
+      // If this source only offers torrent links and the user hasn't enabled
+      // torrenting yet, surface a guided prompt.
+      await maybeWarnTorrentOnly(nextPayload, data?.games);
+    } catch (err) {
+      console.error("Custom source sync failed:", err);
+      const msg = String(err?.message || "");
+      // Any HTTP error (403 Cloudflare, 404, 429, generic network failure, etc.)
+      // means we couldn't refetch automatically. Open the URL in the user's
+      // browser so they can grab the JSON themselves and paste it back in.
+      const isFetchFailure =
+        /Custom source HTTP|HTTP\s*\d+|Failed to fetch|NetworkError|ETIMEDOUT|ENOTFOUND|ECONNRESET/i.test(
+          msg
+        );
+      // If we already have saved JSON for this source, don't revert -- the
+      // user's data is still usable, we just couldn't refresh it.
+      const hasSavedJson = !!source?.lastSynced;
+      if (isFetchFailure) {
+        toast.error(
+          (t("localRefresh.customSourceSyncFailed") || "Sync failed") +
+            " - " +
+            (t("localRefresh.customSourcePasteFallback") ||
+              "paste the JSON manually to update.")
+        );
+        setManualPasteSourceUrl(source.url);
+        setManualPasteText("");
+        setManualPasteError(null);
+        setManualPasteOpen(true);
+        try {
+          if (window.electron?.openURL) {
+            await window.electron.openURL(source.url);
+          }
+        } catch (openErr) {
+          console.warn("Failed to open source URL:", openErr);
+        }
+      } else {
+        toast.error(
+          (t("localRefresh.customSourceSyncFailed") || "Sync failed") +
+            (err?.message ? `: ${err.message}` : "")
+        );
+        // Sync failed outright -- only revert if we never had data for this
+        // source to begin with. Otherwise keep the existing saved payload.
+        if (!hasSavedJson) {
+          await revertPendingCustomSource();
+        }
+      }
+    } finally {
+      setIsSyncingCustomSource(false);
+    }
+  };
+
+  // Revert `customSource` to whatever was active before the user picked a new
+  // one, used when they back out of the manual-paste dialog without pasting.
+  const revertPendingCustomSource = async () => {
+    const prev = previousCustomSourceRef.current;
+    previousCustomSourceRef.current = null;
+    setCustomSource(prev || null);
+    setCustomSourceLastSynced(
+      prev?.lastSynced ? new Date(prev.lastSynced) : null
+    );
+    setCustomSourceGameCount(
+      typeof prev?.gameCount === "number" ? prev.gameCount : null
+    );
+    try {
+      await updateSetting("customSource", prev || null);
+    } catch (e) {
+      console.warn("Failed to revert customSource setting:", e);
+    }
+  };
+
+  const handleIngestManualJson = async () => {
+    if (isIngestingManual) return;
+    setManualPasteError(null);
+    setIsIngestingManual(true);
+    try {
+      // Clear active custom list when ingesting JSON for a regular external source.
+      if (activeCustomList) {
+        setActiveCustomList(null);
+        await updateSetting("activeCustomList", null);
+      }
+      
+      const data = await gameService.ingestCustomSourceJson(manualPasteText);
+      const count = data?.games?.length || 0;
+      const now = Date.now();
+      setCustomSourceLastSynced(new Date(now));
+      setCustomSourceGameCount(count);
+      const nextPayload = {
+        ...(customSource || {}),
+        lastSynced: now,
+        lastUsed: now,
+        gameCount: count,
+        // Flag this source as user-provided so gameService never tries to
+        // re-fetch it from the upstream URL (the user's pasted JSON is
+        // persisted to disk and will be used on future loads).
+        userProvided: true,
+      };
+      setCustomSource(nextPayload);
+      await updateSetting("customSource", nextPayload);
+      await upsertLibraryEntry(nextPayload);
+      
+      // Clear all caches to force reload with new data
+      gameService.clearMemoryCache();
+      localStorage.removeItem("ascendara_games_cache");
+      localStorage.removeItem("local_ascendara_games_timestamp");
+      localStorage.removeItem("local_ascendara_metadata_cache");
+      localStorage.removeItem("local_ascendara_last_updated");
+      
+      if (window.electron?.setTimestampValue) {
+        await window.electron.setTimestampValue("hasIndexBefore", true);
+        setHasIndexBefore(true);
+      }
+      toast.success(
+        (t("localRefresh.customSourceSynced") || "Custom source synced") +
+          ` (${count.toLocaleString()} ${t("localRefresh.games") || "games"})`
+      );
+      window.dispatchEvent(
+        new CustomEvent("index-refreshed", { detail: { timestamp: now } })
+      );
+      await maybeWarnTorrentOnly(nextPayload, data?.games);
+      // Ingest succeeded -- commit the selection by clearing the revert snapshot.
+      previousCustomSourceRef.current = null;
+      setManualPasteOpen(false);
+      setManualPasteText("");
+    } catch (err) {
+      console.error("Manual JSON ingest failed:", err);
+      setManualPasteError(err?.message || String(err));
+    } finally {
+      setIsIngestingManual(false);
+    }
+  };
+
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setManualPasteText(text);
+        setManualPasteError(null);
+      }
+    } catch (e) {
+      console.warn("Clipboard read failed:", e);
+    }
+  };
+
+  const handlePasteJsonFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setJsonImportText(text);
+        setJsonImportError(null);
+      }
+    } catch (e) {
+      console.warn("Clipboard read failed:", e);
+    }
+  };
+
+  const handleProcessJsonImport = async () => {
+    if (!jsonImportText.trim()) return;
+    
+    setIsProcessingJson(true);
+    setJsonImportError(null);
+    
+    try {
+      const parsedData = JSON.parse(jsonImportText);
+      const validation = validateAndDetectJsonFormat(parsedData);
+      
+      if (!validation.isValid) {
+        setJsonImportError(validation.error);
+        return;
+      }
+      
+      setJsonImportData(validation.data);
+      
+      // Auto-fill list name if there's a name field in the JSON
+      if (parsedData.name && typeof parsedData.name === 'string' && parsedData.name.trim()) {
+        setJsonListName(parsedData.name.trim());
+      } else {
+        setJsonListName("");
+      }
+      
+      setShowJsonConfirmDialog(true);
+      setJsonImportText("");
+      setShowJsonImportDialog(false);
+      
+    } catch (err) {
+      console.error("JSON parsing failed:", err);
+      setJsonImportError(err?.message || "Invalid JSON format");
+    } finally {
+      setIsProcessingJson(false);
+    }
+  };
+
+  const handleConfirmJsonImport = async () => {
+    if (!jsonImportData || !jsonListName.trim()) return;
+    
+    try {
+      // Use the original JSON data as-is without conversion
+      const originalData = jsonImportData.originalData;
+      const count = jsonImportData.gameCount;
+      const now = Date.now();
+      
+      // Create a custom list entry
+      const customListData = {
+        id: `custom_list_${now}`,
+        name: jsonListName.trim(),
+        itemCount: count,
+        format: jsonImportData.type,
+        createdAt: now,
+        lastUsed: now,
+        originalJson: originalData, // Store the original JSON structure
+        keys: jsonImportData.keys,
+        sampleItems: jsonImportData.sampleGames
+      };
+      
+      // Store the JSON data directly in a way that can be accessed by the game service
+      if (window.electron?.setCustomListData) {
+        await window.electron.setCustomListData(customListData.id, originalData);
+      }
+      
+      // Add to custom lists and persist.
+      const updatedLists = [...customLists, customListData];
+      setCustomLists(updatedLists);
+      await updateSetting("customLists", updatedLists);
+
+      // Close dialogs before switching so the UI feels responsive.
+      setShowJsonConfirmDialog(false);
+      setJsonImportData(null);
+      setJsonImportText("");
+      setJsonListName("");
+
+      // Activate the newly-imported list through the same pipeline used by
+      // list switching so the game service actually loads it as the source.
+      await handleSwitchToList(customListData);
+
+      window.dispatchEvent(
+        new CustomEvent("custom-list-imported", { detail: { list: customListData, timestamp: now } })
+      );
+      
+    } catch (err) {
+      console.error("JSON import failed:", err);
+      toast.error(err?.message || "Failed to import JSON data");
+    }
+  };
+
+  // Normalize any supported custom list JSON into bucket-compatible {name, downloads: []}
+  // so the game service pipeline (ingestCustomSourceJson) can consume it uniformly.
+  const normalizeListDataToBucketFormat = (raw, fallbackName) => {
+    if (!raw || typeof raw !== "object") return null;
+    if (Array.isArray(raw.downloads)) {
+      return { name: raw.name || fallbackName, ...raw };
+    }
+    if (Array.isArray(raw.games)) {
+      const downloads = raw.games.map((g) => {
+        // Collect URIs from every common shape used by community JSONs.
+        const uris = [];
+        if (Array.isArray(g.uris)) uris.push(...g.uris);
+        if (g.uri) uris.push(g.uri);
+        if (g.magnet) uris.push(g.magnet);
+        if (g.url) uris.push(g.url);
+        if (g.dirlink) uris.push(g.dirlink);
+        if (g.download_links && typeof g.download_links === "object") {
+          for (const val of Object.values(g.download_links)) {
+            if (Array.isArray(val)) uris.push(...val);
+            else if (typeof val === "string") uris.push(val);
+          }
+        }
+        return {
+          title: g.title || g.name || g.game || "Unknown",
+          uris: uris.filter(Boolean),
+          uploadDate:
+            g.uploadDate || g.date || g.latest_update || new Date().toISOString(),
+          fileSize: g.fileSize || g.size || "N/A",
+        };
+      });
+      return { name: raw.name || fallbackName, downloads };
+    }
+    return null;
+  };
+
+  // Custom Lists Management Functions
+  // A custom list is just a user-imported external source. Reuse the same pipeline.
+  const handleSwitchToList = async (list) => {
+    try {
+      const now = Date.now();
+
+      // If an external (non-custom-list) source is currently active, push it
+      // down to the saved sources library so it can be swapped back later.
+      if (customSource && !customSource.isCustomList) {
+        await upsertLibraryEntry(customSource);
+      }
+
+      // Ensure external sources mode is enabled (custom lists live within it).
+      if (!customSourcesMode) {
+        setCustomSourcesMode(true);
+        await updateSetting("customSourcesMode", true);
+      }
+
+      // Pull stored JSON for this list. Prefer electron-backed storage, but
+      // fall back to the copy embedded in the list object (set at import time)
+      // so lists always work even if disk storage is unavailable.
+      let raw = null;
+      try {
+        if (window.electron?.getCustomListData) {
+          raw = await window.electron.getCustomListData(list.id);
+        }
+      } catch (e) {
+        console.warn("[LocalRefresh] getCustomListData failed:", e);
+      }
+      if (!raw) raw = list.originalJson || null;
+      if (typeof raw === "string") {
+        try { raw = JSON.parse(raw); } catch (_) { /* fall through */ }
+      }
+
+      const normalized = normalizeListDataToBucketFormat(raw, list.name);
+      if (!normalized || !Array.isArray(normalized.downloads) || normalized.downloads.length === 0) {
+        console.error("[LocalRefresh] Custom list normalize failed. raw keys:", raw && typeof raw === "object" ? Object.keys(raw) : typeof raw);
+        toast.error(t("localRefresh.listDataInvalid") || "Custom list data is invalid");
+        return;
+      }
+
+      // Build a customSource payload that looks just like any other external
+      // source. The URL is a stable synthetic key used only as a cache key.
+      const customSourcePayload = {
+        id: list.id,
+        name: list.name,
+        url: `custom_list_${list.id}`,
+        gameCount: normalized.downloads.length,
+        lastSynced: now,
+        lastUsed: now,
+        isCustomList: true,
+      };
+
+      // IMPORTANT: settings.customSource must be set BEFORE ingestCustomSourceJson
+      // since the game service reads customSource from settings internally.
+      await updateSetting("customSource", customSourcePayload);
+      setCustomSource(customSourcePayload);
+      setCustomSourceLastSynced(new Date(now));
+      setCustomSourceGameCount(normalized.downloads.length);
+      setActiveCustomList(list);
+      await updateSetting("activeCustomList", list);
+
+      // Clear legacy caches and memory cache so the new source loads fresh.
+      gameService.clearMemoryCache();
+      gameService.clearCustomSourceCache(customSourcePayload.url);
+      localStorage.removeItem("ascendara_games_cache");
+      localStorage.removeItem("local_ascendara_games_timestamp");
+      localStorage.removeItem("local_ascendara_metadata_cache");
+      localStorage.removeItem("local_ascendara_last_updated");
+
+      // Feed the normalized JSON through the exact same pipeline external
+      // sources use. This populates the URL-keyed cache so future reads return
+      // this data without attempting a network fetch.
+      await gameService.ingestCustomSourceJson(normalized);
+
+      if (window.electron?.setTimestampValue) {
+        await window.electron.setTimestampValue("hasIndexBefore", true);
+        setHasIndexBefore(true);
+      }
+
+      window.dispatchEvent(
+        new CustomEvent("index-refreshed", { detail: { timestamp: now } })
+      );
+
+      toast.success(
+        (t("localRefresh.listSwitched") || "Switched to list") + `: ${list.name}`
+      );
+    } catch (err) {
+      console.error("Failed to switch to list:", err);
+      toast.error(err?.message || "Failed to switch list");
+    }
+  };
+
+  
+  const handleRenameList = async (list) => {
+    const newName = prompt(
+      t("localRefresh.enterNewName") || "Enter new name for this list:",
+      list.name
+    );
+    
+    if (newName && newName.trim() && newName.trim() !== list.name) {
+      try {
+        const updatedLists = customLists.map(l => 
+          l.id === list.id ? { ...l, name: newName.trim() } : l
+        );
+        setCustomLists(updatedLists);
+        await updateSetting("customLists", updatedLists);
+        
+        // Update active list if it's the one being renamed
+        if (activeCustomList?.id === list.id) {
+          const updatedActiveList = { ...activeCustomList, name: newName.trim() };
+          setActiveCustomList(updatedActiveList);
+          await updateSetting("activeCustomList", updatedActiveList);
+        }
+        
+        toast.success(t("localRefresh.listRenamed") || "List renamed successfully");
+      } catch (err) {
+        console.error("Failed to rename list:", err);
+        toast.error(err?.message || "Failed to rename list");
+      }
+    }
+  };
+
+  const handleDeleteList = async (list) => {
+    const confirmed = confirm(
+      (t("localRefresh.confirmDeleteList") || "Are you sure you want to delete this list?") +
+      ` "${list.name}"`
+    );
+    
+    if (confirmed) {
+      try {
+        const updatedLists = customLists.filter(l => l.id !== list.id);
+        setCustomLists(updatedLists);
+        await updateSetting("customLists", updatedLists);
+        
+        // Remove from electron storage
+        if (window.electron?.removeCustomListData) {
+          await window.electron.removeCustomListData(list.id);
+        }
+        
+        // Remove from active list if it was the active one
+        if (activeCustomList?.id === list.id) {
+          setActiveCustomList(null);
+          await updateSetting("activeCustomList", null);
+        }
+        
+        toast.success(t("localRefresh.listDeleted") || "List deleted successfully");
+      } catch (err) {
+        console.error("Failed to delete list:", err);
+        toast.error(err?.message || "Failed to delete list");
+      }
+    }
+  };
+
+  const validateAndDetectJsonFormat = (data) => {
+    if (!data || typeof data !== 'object') {
+      return { isValid: false, error: "Invalid JSON: must be an object" };
+    }
+    
+    // Check for games array format
+    if (data.games && Array.isArray(data.games)) {
+      if (data.games.length === 0) {
+        return { isValid: false, error: "Games array is empty" };
+      }
+      
+      // Extract keys from sample games
+      const sampleGames = data.games.slice(0, 3);
+      const keys = new Set();
+      sampleGames.forEach(game => {
+        if (game && typeof game === 'object') {
+          Object.keys(game).forEach(key => keys.add(key));
+        }
+      });
+      
+      return {
+        isValid: true,
+        data: {
+          type: 'games',
+          gameCount: data.games.length,
+          keys: Array.from(keys),
+          sampleGames,
+          originalData: data
+        }
+      };
+    }
+    
+    // Check for downloads array format
+    if (data.downloads && Array.isArray(data.downloads)) {
+      if (data.downloads.length === 0) {
+        return { isValid: false, error: "Downloads array is empty" };
+      }
+      
+      // Extract keys from sample downloads
+      const sampleGames = data.downloads.slice(0, 3);
+      const keys = new Set();
+      sampleGames.forEach(download => {
+        if (download && typeof download === 'object') {
+          Object.keys(download).forEach(key => keys.add(key));
+        }
+      });
+      
+      return {
+        isValid: true,
+        data: {
+          type: 'downloads',
+          gameCount: data.downloads.length,
+          keys: Array.from(keys),
+          sampleGames,
+          originalData: data
+        }
+      };
+    }
+    
+    return { 
+      isValid: false, 
+      error: "Unsupported format. Expected { \"games\": [...] } or { \"name\": \"...\", \"downloads\": [...] }" 
+    };
+  };
+
+  const filteredBucketSources = useMemo(() => {
+    const q = bucketSearchQuery.trim().toLowerCase();
+    if (!q) return bucketSources;
+    return bucketSources.filter((s) => {
+      const title = (s?.title || s?.name || "").toLowerCase();
+      const desc = (s?.description || "").toLowerCase();
+      return title.includes(q) || desc.includes(q);
+    });
+  }, [bucketSources, bucketSearchQuery]);
+
   // Handle back navigation
   const handleBack = () => {
     if (welcomeStep) {
@@ -799,7 +1759,7 @@ const LocalRefresh = () => {
 
   return (
     <div className={`${welcomeStep ? "mt-0 pt-10" : "mt-6"} min-h-screen bg-background`}>
-      <div className="container mx-auto max-w-5xl px-4 py-8">
+      <div className="container mx-auto max-w-3xl px-4 py-8">
         {/* First-time Setup Banner */}
         {welcomeStep && (
           <motion.div
@@ -856,26 +1816,9 @@ const LocalRefresh = () => {
                 <h1 className="text-3xl font-bold">
                   {t("localRefresh.title") || "Local Game Index"}
                 </h1>
-                {settings?.usingLocalIndex && (
-                  <Badge className="hover:bg-green/500/10 mb-2 gap-1 bg-green-500/10 text-green-600 dark:text-green-400">
-                    <Zap className="h-3 w-3" />
-                    {t("localRefresh.usingLocalIndex") || "Active"}
-                  </Badge>
-                )}
               </div>
               <p className="mt-1 text-muted-foreground">
-                {t("localRefresh.description")}&nbsp;
-                <a
-                  onClick={() =>
-                    window.electron.openURL(
-                      "https://ascendara.app/docs/features/refreshing-index"
-                    )
-                  }
-                  className="inline-flex cursor-pointer items-center text-xs text-primary hover:underline"
-                >
-                  {t("common.learnMore")}
-                  <ExternalLink className="ml-1 h-3 w-3" />
-                </a>
+                {t("localRefresh.description")}
               </p>
             </div>
             {lastRefreshTime && (
@@ -891,405 +1834,952 @@ const LocalRefresh = () => {
             )}
           </div>
         </div>
-
-        {/* Two Column Layout */}
-        <div className="grid gap-6 lg:grid-cols-3">
-          {/* Left Column - Main Actions */}
-          <div className="space-y-4 lg:col-span-2">
-            {/* Download Shared Index Card */}
-            {apiAvailable && (
-              <Card className="p-5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10">
-                      <Cloud className="h-5 w-5 text-blue-500" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="font-medium">
-                          {t("localRefresh.downloadSharedIndex") ||
-                            "Download Shared Index"}
-                        </h3>
-                        {!hasIndexBefore && (
-                          <Badge variant="secondary" className="text-xs">
-                            {t("localRefresh.recommended") || "Recommended"}
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        {t("localRefresh.downloadSharedIndexDesc") ||
-                          "Download a pre-built index shared by the community"}
-                        &nbsp;
-                        <a
-                          onClick={() =>
-                            window.electron.openURL(
-                              "https://ascendara.app/docs/features/refreshing-index#community-shared-index"
-                            )
-                          }
-                          className="inline-flex cursor-pointer items-center text-xs text-primary hover:underline"
+        <div className="space-y-4">
+            <Card className="relative overflow-hidden border-0 bg-gradient-to-br from-card to-card/50 p-0 shadow-md ring-1 ring-border/60">
+              <div
+                className={`absolute inset-x-0 top-0 h-24 opacity-50 ${
+                  customSourcesMode
+                    ? "bg-gradient-to-br from-purple-500/20 via-pink-500/10 to-transparent"
+                    : "bg-gradient-to-br from-primary/20 via-blue-500/10 to-transparent"
+                }`}
+              />
+              <div className="relative p-6">
+                <div className="flex items-start gap-4">
+                  <div
+                    className={`flex h-14 w-14 mt-2 shrink-0 items-center justify-center rounded-2xl shadow-sm ${
+                      customSourcesMode
+                        ? "bg-gradient-to-br from-purple-500 to-pink-500 text-white"
+                        : "bg-gradient-to-br from-primary to-blue-500 text-white"
+                    }`}
+                  >
+                    {customSourcesMode ? (
+                      <Globe className="h-7 w-7" />
+                    ) : (
+                      <Database className="h-7 w-7" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="truncate text-xl mt-2 font-bold leading-tight">
+                        {customSourcesMode
+                          ? activeCustomList?.name || customSource?.name ||
+                            t("localRefresh.noSourceSelected") ||
+                            "No source selected"
+                          : t("localRefresh.ascendaraIndex") || "Ascendara Index"}
+                      </h2>
+                      {customSourcesMode ? (
+                        <Badge
+                          variant="outline"
+                          className="gap-1 border-purple-500/40 bg-purple-500/10 text-[10px] uppercase tracking-wide text-purple-600 dark:text-purple-300"
                         >
-                          {t("common.learnMore")}
-                          <ExternalLink className="ml-1 h-3 w-3" />
-                        </a>
-                      </p>
-                      {indexInfo && (
-                        <p className="text-xs text-muted-foreground/70">
-                          {indexInfo.gameCount?.toLocaleString()}{" "}
-                          {t("localRefresh.games") || "games"} •{" "}
-                          {t("localRefresh.updated") || "Updated"}{" "}
-                          {new Date(indexInfo.date).toLocaleDateString(undefined, {
-                            month: "short",
-                            day: "numeric",
-                          })}
-                        </p>
+                          {t("localRefresh.customMode") || "Custom"}
+                        </Badge>
+                      ) : settings?.usingLocalIndex ? (
+                        <Badge className="gap-1 bg-green-500/15 text-green-600 hover:bg-green-500/15 dark:text-green-400">
+                          <Zap className="h-3 w-3" />
+                          {t("localRefresh.usingLocalIndex") || "Active"}
+                        </Badge>
+                      ) : null}
+                      {customSourcesMode &&
+                        Array.isArray(customSource?.status) &&
+                        customSource.status.includes("Trusted") && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge
+                                  variant="outline"
+                                  className="gap-1 border-emerald-500/40 bg-emerald-500/10 text-[10px] uppercase tracking-wide text-emerald-600 dark:text-emerald-300 cursor-help"
+                                >
+                                  <ShieldCheck className="h-3 w-3" />
+                                  {t("localRefresh.trusted") || "Trusted"}
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs text-secondary">
+                                <p>
+                                  {t("localRefresh.trustedTooltip") ||
+                                    "Trusted sources are widely used by the community and known to be reliable and safe."}
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
+                      {customSourcesMode && customSource?.torrentOnly && (
+                        <Badge
+                          variant="outline"
+                          className="gap-1 border-orange-500/40 bg-orange-500/10 text-[10px] uppercase tracking-wide text-orange-600 dark:text-orange-400"
+                        >
+                          <AlertTriangle className="h-3 w-3" />
+                          {t("localRefresh.torrentOnly") || "Torrent only"}
+                        </Badge>
                       )}
                     </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    className="gap-2 whitespace-nowrap text-secondary"
-                    onClick={async () => {
-                      if (downloadingIndex || isRefreshing || isUploading) return;
-                      // Don't set downloadingIndex here - let the event handler do it
-                      try {
-                        await window.electron.downloadSharedIndex(localIndexPath);
-                        // Success/error handling is done via IPC events
-                        // (public-index-download-complete, public-index-download-error)
-                      } catch (e) {
-                        console.error("Failed to start download:", e);
-                        toast.error(
-                          t("localRefresh.indexDownloadFailed") ||
-                            "Failed to start download"
-                        );
+                    <p className="mb-4 text-sm text-muted-foreground">
+                      {customSourcesMode
+                        ? activeCustomList
+                          ? (t("localRefresh.heroDescCustomListActive") || "Browsing custom list") + ` "${activeCustomList.name}" (${activeCustomList.itemCount?.toLocaleString() || 0} ${t("localRefresh.items") || "items"})`
+                          : customSource?.url
+                            ? t("localRefresh.heroDescCustomActive") ||
+                              "Pulling games from your selected external source."
+                            : t("localRefresh.heroDescCustomEmpty") ||
+                              "Set a source bucket URL below to start pulling games."
+                        : t("localRefresh.heroDescAscendara") ||
+                          "Your offline copy of Ascendara's curated game database."}
+                          &nbsp;
+                    <a
+                      className="inline-flex cursor-pointer items-center text-xs text-primary hover:underline"
+                      onClick={() =>
+                        window.electron.openURL(
+                          "https://ascendara.app/docs/features/external-sources"
+                        )
                       }
-                    }}
-                    disabled={downloadingIndex || isRefreshing || isUploading}
+                    >
+                      {t("common.learnMore")}
+                      <ExternalLink className="ml-1 h-3 w-3" />
+                    </a>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Stats */}
+                <div className="mt-5 grid grid-cols-3 gap-3">
+                  <div className="rounded-xl border border-border/50 bg-background/60 p-3 backdrop-blur-sm">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {t("localRefresh.games") || "Games"}
+                    </div>
+                    <div className="mt-1 text-2xl font-bold leading-none">
+                      {(() => {
+                        const count = customSourcesMode
+                          ? activeCustomList?.itemCount ??
+                            customSourceGameCount ??
+                            customSource?.gameCount ??
+                            customSource?.gamesCount
+                          : indexInfo?.gameCount;
+                        return count != null ? count.toLocaleString() : "—";
+                      })()}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-background/60 p-3 backdrop-blur-sm">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {customSourcesMode
+                        ? t("localRefresh.lastSynced") || "Last synced"
+                        : t("localRefresh.lastRefresh") || "Last refresh"}
+                    </div>
+                    <div className="mt-1 truncate text-sm font-semibold">
+                      {customSourcesMode
+                        ? activeCustomList?.createdAt
+                          ? formatLastRefreshTime(new Date(activeCustomList.createdAt))
+                          : customSourceLastSynced
+                            ? formatLastRefreshTime(customSourceLastSynced)
+                            : t("localRefresh.never") || "Never"
+                        : lastRefreshTime
+                          ? formatLastRefreshTime(lastRefreshTime)
+                          : t("localRefresh.never") || "Never"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-border/50 bg-background/60 p-3 backdrop-blur-sm">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {customSourcesMode
+                        ? t("localRefresh.rating") || "Rating"
+                        : t("localRefresh.indexUpdated") || "Index age"}
+                    </div>
+                    <div className="mt-1 flex items-center gap-1 text-sm font-semibold">
+                      {customSourcesMode
+                        ? activeCustomList
+                          ? "Not Available"
+                          : (() => {
+                              const r = customSource?.rating;
+                              const avg =
+                                r && typeof r === "object"
+                                  ? r.avg
+                                  : typeof r === "number"
+                                    ? r
+                                    : null;
+                              if (avg == null || Number.isNaN(Number(avg)))
+                                return "—";
+                              return (
+                                <>
+                                  <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />
+                                  {Number(avg).toFixed(1)}
+                                </>
+                              );
+                            })()
+                        : indexInfo?.date
+                          ? new Date(indexInfo.date).toLocaleDateString(
+                              undefined,
+                              { month: "short", day: "numeric" }
+                            )
+                          : "—"}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Primary action bar */}
+                <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
+                  {isRefreshing ? (
+                    <Button
+                      variant="destructive"
+                      size="lg"
+                      onClick={() => setShowStopDialog(true)}
+                      className="gap-2"
+                    >
+                      <StopCircle className="h-4 w-4" />
+                      {t("localRefresh.stop") || "Stop"}
+                    </Button>
+                  ) : isUploading ? (
+                    <Button size="lg" disabled className="gap-2">
+                      <Loader className="h-4 w-4 animate-spin" />
+                      {t("localRefresh.sharing") || "Sharing..."}
+                    </Button>
+                  ) : customSourcesMode ? (
+                    customSource?.url ? (
+                      <>
+                        <Button
+                          size="lg"
+                          onClick={() => handleSyncCustomSource()}
+                          disabled={isSyncingCustomSource || !sourceBucketUrl.trim()}
+                          className="gap-2 text-secondary sm:flex-1"
+                        >
+                          {isSyncingCustomSource ? (
+                            <>
+                              <Loader className="h-4 w-4 animate-spin" />
+                              {t("localRefresh.syncing") || "Syncing..."}
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="h-4 w-4" />
+                              {t("localRefresh.syncNow") || "Sync now"}
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          size="lg"
+                          variant="outline"
+                          onClick={handleOpenSourceBrowser}
+                          disabled={isSyncingCustomSource}
+                          className="gap-2"
+                        >
+                          <Globe className="h-4 w-4" />
+                          {t("localRefresh.changeSource") || "Change source"}
+                        </Button>
+                      </>
+                    ) : sourceBucketUrl.trim() ? (
+                      <Button
+                        size="lg"
+                        onClick={handleOpenSourceBrowser}
+                        className="gap-2 text-secondary sm:flex-1"
+                      >
+                        <Globe className="h-4 w-4" />
+                        {t("localRefresh.browseSources") || "Browse sources"}
+                      </Button>
+                    ) : null
+                    
+                  ) : (
+                    <>
+                      {apiAvailable ? (
+                        <Button
+                          size="lg"
+                          className="gap-2 text-secondary sm:flex-1"
+                          onClick={async () => {
+                            if (downloadingIndex || isRefreshing || isUploading)
+                              return;
+                            try {
+                              await window.electron.downloadSharedIndex(
+                                localIndexPath
+                              );
+                            } catch (e) {
+                              console.error("Failed to start download:", e);
+                              toast.error(
+                                t("localRefresh.indexDownloadFailed") ||
+                                  "Failed to start download"
+                              );
+                            }
+                          }}
+                          disabled={
+                            downloadingIndex || isRefreshing || isUploading
+                          }
+                        >
+                          {downloadingIndex ? (
+                            <>
+                              <Loader className="h-4 w-4 animate-spin" />
+                              {indexDownloadProgress?.phase === "extracting"
+                                ? indexDownloadProgress.currentGame
+                                  ? indexDownloadProgress.currentGame
+                                  : indexDownloadProgress.progress >= 1
+                                    ? `${t("localRefresh.extracting") || "Extracting"} ${Math.floor(indexDownloadProgress.progress)}%`
+                                    : t("localRefresh.extracting") ||
+                                      "Extracting..."
+                                : indexDownloadProgress?.progress > 0
+                                  ? `${Math.floor(indexDownloadProgress.progress)}%`
+                                  : t("localRefresh.downloading") ||
+                                    "Downloading..."}
+                            </>
+                          ) : (
+                            <>
+                              <Cloud className="h-4 w-4" />
+                              {hasIndexBefore
+                                ? t("localRefresh.refreshNow") || "Refresh now"
+                                : t("localRefresh.getStarted") ||
+                                  "Get the index"}
+                            </>
+                          )}
+                        </Button>
+                      ) : null}
+                      <Button
+                        size="lg"
+                        variant={apiAvailable ? "outline" : "default"}
+                        className={
+                          apiAvailable
+                            ? "gap-2"
+                            : "gap-2 text-secondary sm:flex-1"
+                        }
+                        onClick={handleOpenRefreshDialog}
+                      >
+                        <Play className="h-4 w-4" />
+                        {refreshStatus === "completed"
+                          ? t("localRefresh.scrapeAgain") || "Scrape again"
+                          : t("localRefresh.scrapeManually") ||
+                            "Scrape manually"}
+                      </Button>
+                    </>
+                  )}
+                </div>
+
+                {/* Contextual hint / status line */}
+                {(currentStep || uploadError || refreshStatus === "error") && (
+                  <p
+                    className={`mt-3 text-xs ${
+                      uploadError || refreshStatus === "error"
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                    }`}
                   >
-                    {downloadingIndex ? (
-                      <>
-                        <Loader className="h-4 w-4 animate-spin" />
-                        {indexDownloadProgress?.phase === "extracting"
-                          ? indexDownloadProgress.currentGame
-                            ? indexDownloadProgress.currentGame
-                            : indexDownloadProgress.progress >= 1
-                              ? `${t("localRefresh.extracting") || "Extracting"} ${Math.floor(indexDownloadProgress.progress)}%`
-                              : t("localRefresh.extracting") || "Extracting..."
-                          : indexDownloadProgress?.progress > 0
-                            ? `${Math.floor(indexDownloadProgress.progress)}%`
-                            : t("localRefresh.downloading") || "Downloading..."}
-                      </>
-                    ) : (
-                      <>
-                        <Download className="h-4 w-4" />
-                        {t("localRefresh.download") || "Download"}
-                      </>
-                    )}
-                  </Button>
+                    {uploadError ||
+                      currentStep ||
+                      (refreshStatus === "error"
+                        ? t("localRefresh.statusError") || "Last refresh failed"
+                        : "")}
+                  </p>
+                )}
+              </div>
+            </Card>
+            {!customSourcesMode && (
+              <Card className="overflow-hidden border-0 p-0">
+                <div className="flex items-start gap-3 p-5">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-blue-500/15">
+                    <Calendar className="h-5 w-5 text-primary" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="font-semibold">
+                          {t("localRefresh.autoRefresh") || "Automatic Index Refreshing"}
+                        </h3>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {autoRefreshEnabled && isAuthenticated
+                            ? (
+                                t("localRefresh.autoRefreshActiveSummary") ||
+                                "Refreshes every {{days}} days using {{method}}"
+                              )
+                                .replace("{{days}}", autoRefreshInterval)
+                                .replace(
+                                  "{{method}}",
+                                  autoRefreshMethod === "shared"
+                                    ? t("localRefresh.sharedIndex") ||
+                                        "shared index"
+                                    : t("localRefresh.manualScrape") || "scraping"
+                                )
+                            : t("localRefresh.autoRefreshCardDesc") ||
+                              "Keep your index up to date automatically"}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={autoRefreshEnabled && isAuthenticated}
+                        onCheckedChange={async (checked) => {
+                          if (!isAuthenticated) {
+                            toast.info(
+                              t("localRefresh.autoRefreshRequiresAscend") ||
+                                "Sign in to Ascend to enable automatic refreshing"
+                            );
+                            navigate("/ascend");
+                            return;
+                          }
+                          setAutoRefreshEnabled(checked);
+                          await updateSetting("autoRefreshEnabled", checked);
+                          toast.success(
+                            checked
+                              ? t("localRefresh.autoRefreshEnabled") ||
+                                  "Automatic refresh enabled"
+                              : t("localRefresh.autoRefreshDisabled") ||
+                                  "Automatic refresh disabled"
+                          );
+                        }}
+                        disabled={!isAuthenticated}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <AnimatePresence>
+                  {autoRefreshEnabled && isAuthenticated && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="border-t border-border/60 bg-muted/20"
+                    >
+                      <div className="space-y-4 p-5">
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            onClick={async () => {
+                              setAutoRefreshMethod("shared");
+                              await updateSetting("autoRefreshMethod", "shared");
+                            }}
+                            className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition-all ${
+                              autoRefreshMethod === "shared"
+                                ? "border-primary bg-primary/5 shadow-sm"
+                                : "border-border hover:bg-accent/50"
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <Cloud className="h-4 w-4" />
+                              <span className="text-xs font-semibold">
+                                {t("localRefresh.sharedIndex") || "Shared Index"}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                              {t("localRefresh.sharedIndexDesc") ||
+                                "Download pre-built index from community"}
+                            </p>
+                          </button>
+                          <button
+                            onClick={async () => {
+                              setAutoRefreshMethod("manual");
+                              await updateSetting("autoRefreshMethod", "manual");
+                            }}
+                            className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition-all ${
+                              autoRefreshMethod === "manual"
+                                ? "border-primary bg-primary/5 shadow-sm"
+                                : "border-border hover:bg-accent/50"
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <Settings2 className="h-4 w-4" />
+                              <span className="text-xs font-semibold">
+                                {t("localRefresh.manualScrape") || "Manual Scrape"}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                              {t("localRefresh.manualScrapeDesc") ||
+                                "Build your own index by scraping"}
+                            </p>
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-muted-foreground">
+                            {t("localRefresh.refreshInterval") || "Refresh Every"}
+                          </Label>
+                          <Select
+                            value={autoRefreshInterval}
+                            onValueChange={async (value) => {
+                              setAutoRefreshInterval(value);
+                              await updateSetting("autoRefreshInterval", value);
+                            }}
+                          >
+                            <SelectTrigger className="h-8 w-[160px] bg-background text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="2">
+                                {t("localRefresh.intervalOptions.twoDays") || "2 Days"}
+                              </SelectItem>
+                              <SelectItem value="3">
+                                {t("localRefresh.intervalOptions.threeDays") || "3 Days"}
+                              </SelectItem>
+                              <SelectItem value="5">
+                                {t("localRefresh.intervalOptions.fiveDays") || "5 Days"}
+                              </SelectItem>
+                              <SelectItem value="7">
+                                {t("localRefresh.intervalOptions.oneWeek") || "1 Week"}
+                              </SelectItem>
+                              <SelectItem value="10">
+                                {t("localRefresh.intervalOptions.tenDays") || "10 Days"}
+                              </SelectItem>
+                              <SelectItem value="14">
+                                {t("localRefresh.intervalOptions.twoWeeks") || "2 Weeks"}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                {!isAuthenticated && (
+                  <div className="flex items-start gap-2 border-t border-border/60 bg-purple-500/5 px-5 py-3 text-xs text-muted-foreground">
+                    <Info className="h-4 w-4 shrink-0 text-purple-500" />
+                    <span>
+                      {t("localRefresh.autoRefreshAscendInfo") ||
+                        "Sign in to Ascend to enable automatic index refreshing and keep your game library up to date effortlessly."}
+                    </span>
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {/* Share Index compact */}
+            {!customSourcesMode && (
+              <Card className="p-5 border-0">
+                <div className="flex items-start gap-3">
+                  <div
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+                      settings?.shareLocalIndex
+                        ? "bg-gradient-to-br from-green-500/15 to-emerald-500/15"
+                        : "bg-muted"
+                    }`}
+                  >
+                    <Share2
+                      className={`h-5 w-5 ${
+                        settings?.shareLocalIndex
+                          ? "text-green-600 dark:text-green-400"
+                          : "text-muted-foreground"
+                      }`}
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="font-semibold">
+                          {t("localRefresh.shareIndex") || "Share your index"}
+                        </h3>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {t("localRefresh.shareIndexDesc") ||
+                            "Help others by uploading your index after refresh"}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={!!settings?.shareLocalIndex}
+                        onCheckedChange={(checked) =>
+                          updateSetting("shareLocalIndex", checked)
+                        }
+                        disabled={isRefreshing}
+                      />
+                    </div>
+                    {settings?.shareLocalIndex &&
+                      settings?.blacklistIDs?.some(
+                        (id) =>
+                          !["ABSXUc", "AWBgqf", "ATaHuq"].includes(id)
+                      ) && (
+                        <div className="mt-3 flex items-start gap-2 rounded-lg bg-orange-500/10 p-2.5 text-xs text-orange-600 dark:text-orange-400">
+                          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <span>
+                            {t("localRefresh.blacklistWarning") ||
+                              "Your index won't be shared because you have custom blacklisted games. Remove them to share your index with the community."}
+                          </span>
+                        </div>
+                      )}
+                  </div>
                 </div>
               </Card>
             )}
 
-            {/* Scrape from SteamRIP Card */}
-            <Card className="p-5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  {isUploading ? (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10">
-                      <Upload className="h-5 w-5 animate-pulse text-blue-500" />
-                    </div>
-                  ) : isRefreshing ? (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                      <LoaderIcon className="h-5 w-5 animate-spin text-primary" />
-                    </div>
-                  ) : refreshStatus === "completed" ? (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-500/10">
-                      <CircleCheck className="h-5 w-5 text-green-500" />
-                    </div>
-                  ) : refreshStatus === "error" || uploadError ? (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-red-500/10">
-                      <XCircle className="h-5 w-5 text-red-500" />
-                    </div>
-                  ) : (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                      <RefreshCw className="h-5 w-5 text-primary" />
-                    </div>
-                  )}
-                  <div>
-                    <h3 className="font-medium">
-                      {isUploading
-                        ? t("localRefresh.uploading") || "Uploading..."
-                        : isRefreshing
-                          ? t("localRefresh.statusRunning") || "Scraping..."
-                          : refreshStatus === "completed"
-                            ? t("localRefresh.statusCompleted") || "Complete"
-                            : refreshStatus === "error" || uploadError
-                              ? t("localRefresh.statusError") || "Failed"
-                              : t("localRefresh.scrapeStart")}
-                    </h3>
-                    <p className="text-sm text-muted-foreground">
-                      {uploadError ||
-                        currentStep ||
-                        t("localRefresh.scrapeFromSteamRIPDesc") ||
-                        "Build your own index by scraping game data directly"}
-                    </p>
-                  </div>
+            {/* Custom Sources - compact switch card; expands to show source list */}
+            <Card className="overflow-hidden p-0 border-0">
+              <div className="flex items-start gap-3 p-5">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500/15 to-pink-500/15">
+                  <PlugIcon className="h-5 w-5 text-purple-500" />
                 </div>
-                {!isRefreshing && !isUploading ? (
-                  <Button
-                    size="sm"
-                    onClick={handleOpenRefreshDialog}
-                    className="gap-2 text-secondary"
-                  >
-                    {refreshStatus === "completed" ? (
-                      <>
-                        <RefreshCw className="h-4 w-4" />
-                        {t("localRefresh.scrapeAgain") || "Scrape Again"}
-                      </>
-                    ) : (
-                      <>
-                        <Play className="h-4 w-4" />
-                        {t("localRefresh.startScrape") || "Start Scrape"}
-                      </>
-                    )}
-                  </Button>
-                ) : isUploading ? (
-                  <Badge variant="secondary" className="gap-1.5">
-                    <Loader className="h-3 w-3 animate-spin" />
-                    {t("localRefresh.sharing") || "Sharing"}
-                  </Badge>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => setShowStopDialog(true)}
-                    className="gap-2"
-                  >
-                    <StopCircle className="h-4 w-4" />
-                    {t("localRefresh.stop") || "Stop"}
-                  </Button>
-                )}
-              </div>
-
-              {/* Source Selection */}
-              {!isRefreshing && !isUploading && (
-                <div className="mt-4 flex text-secondary items-center gap-2">
-                  <Label className="text-sm text-muted-foreground">
-                    {t("localRefresh.source") || "Source"}:
-                  </Label>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant={selectedSource === "steamrip" ? "default" : "outline"}
-                      onClick={() => {
-                        setSelectedSource("steamrip");
-                        window.electron?.updateSetting("localRefreshSource", "steamrip");
-                      }}
-                      className="h-8 text-xs"
-                    >
-                      SteamRIP
-                    </Button>
-                    {SHOW_EXTRA_SOURCES && (
-                      <Button
-                        size="sm"
-                        variant={selectedSource === "goggames" ? "default" : "outline"}
-                        onClick={() => {
-                          setSelectedSource("goggames");
-                          window.electron?.updateSetting("localRefreshSource", "goggames");
-                        }}
-                        className="h-8 text-xs"
-                      >
-                        GOG-Games
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              )}
-            </Card>
-
-            {/* Automatic Index Refreshing Card - Ascend Feature */}
-            <Card className="p-5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-purple-500/10 to-blue-500/10">
-                    <Calendar className="h-5 w-5 text-primary" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-medium">
-                        {t("localRefresh.autoRefresh") || "Automatic Index Refreshing"}
-                      </h3>
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      {t("localRefresh.autoRefreshCardDesc") ||
-                        "Keep your index up to date automatically"}
-                    </p>
-                  </div>
-                </div>
-                <Switch
-                  checked={autoRefreshEnabled && isAuthenticated}
-                  onCheckedChange={async (checked) => {
-                    if (!isAuthenticated) {
-                      toast.info(
-                        t("localRefresh.autoRefreshRequiresAscend") ||
-                          "Sign in to Ascend to enable automatic refreshing"
-                      );
-                      navigate("/ascend");
-                      return;
-                    }
-                    setAutoRefreshEnabled(checked);
-                    await updateSetting("autoRefreshEnabled", checked);
-                    toast.success(
-                      checked
-                        ? t("localRefresh.autoRefreshEnabled") || "Automatic refresh enabled"
-                        : t("localRefresh.autoRefreshDisabled") || "Automatic refresh disabled"
-                    );
-                  }}
-                  disabled={!isAuthenticated}
-                />
-              </div>
-
-              {/* Settings when enabled */}
-              <AnimatePresence>
-                {autoRefreshEnabled && isAuthenticated && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    animate={{ opacity: 1, height: "auto", marginTop: 16 }}
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                    className="space-y-4 border-t border-border/50 pt-4"
-                  >
-                    {/* Method Selection */}
-                    <div className="space-y-2">
-                      <Label className="text-sm font-medium">
-                        {t("localRefresh.autoRefreshMethod") || "Refresh Method"}
-                      </Label>
-                      <div className="grid grid-cols-2 gap-3">
-                        <button
-                          onClick={async () => {
-                            setAutoRefreshMethod("shared");
-                            await updateSetting("autoRefreshMethod", "shared");
-                          }}
-                          className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition-all ${
-                            autoRefreshMethod === "shared"
-                              ? "border-primary bg-primary/5"
-                              : "border-border hover:bg-accent/50"
-                          }`}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-semibold">
+                          {t("localRefresh.customSourcesMode") ||
+                            "External Sources"}
+                        </h3>
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] uppercase tracking-wide"
                         >
-                          <div className="flex items-center gap-2">
-                            <Cloud className="h-4 w-4" />
-                            <span className="text-sm font-medium">
-                              {t("localRefresh.sharedIndex") || "Shared Index"}
-                            </span>
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            {t("localRefresh.sharedIndexDesc") ||
-                              "Download pre-built index from community"}
-                          </p>
-                        </button>
-                        <button
-                          onClick={async () => {
-                            setAutoRefreshMethod("manual");
-                            await updateSetting("autoRefreshMethod", "manual");
-                          }}
-                          className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition-all ${
-                            autoRefreshMethod === "manual"
-                              ? "border-primary bg-primary/5"
-                              : "border-border hover:bg-accent/50"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Settings2 className="h-4 w-4" />
-                            <span className="text-sm font-medium">
-                              {t("localRefresh.manualScrape") || "Manual Scrape"}
-                            </span>
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            {t("localRefresh.manualScrapeDesc") ||
-                              "Build your own index by scraping"}
-                          </p>
-                        </button>
+                          {t("localRefresh.experimental") || "Experimental"}
+                        </Badge>
                       </div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {t("localRefresh.customSourcesModeDesc") ||
+                          "Pull games from an external source bucket of your choice instead of Ascendara's official index."}
+                      </p>
                     </div>
+                    <Switch
+                      checked={customSourcesMode}
+                      onCheckedChange={handleToggleCustomSourcesMode}
+                      disabled={
+                        isRefreshing || isUploading || isSyncingCustomSource
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
 
-                    {/* Interval Selector */}
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm text-muted-foreground">
-                        {t("localRefresh.refreshInterval") || "Refresh Every"}
-                      </Label>
-                      <Select
-                        value={autoRefreshInterval}
-                        onValueChange={async (value) => {
-                          setAutoRefreshInterval(value);
-                          await updateSetting("autoRefreshInterval", value);
-                        }}
-                      >
-                        <SelectTrigger className="w-[180px] bg-background">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="2">
-                            {t("localRefresh.intervalOptions.twoDays") || "2 Days"}
-                          </SelectItem>
-                          <SelectItem value="3">
-                            {t("localRefresh.intervalOptions.threeDays") || "3 Days"}
-                          </SelectItem>
-                          <SelectItem value="5">
-                            {t("localRefresh.intervalOptions.fiveDays") || "5 Days"}
-                          </SelectItem>
-                          <SelectItem value="7">
-                            {t("localRefresh.intervalOptions.oneWeek") || "1 Week"}
-                          </SelectItem>
-                          <SelectItem value="10">
-                            {t("localRefresh.intervalOptions.tenDays") || "10 Days"}
-                          </SelectItem>
-                          <SelectItem value="14">
-                            {t("localRefresh.intervalOptions.twoWeeks") || "2 Weeks"}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
+              <AnimatePresence>
+                {customSourcesMode && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="border-t border-border/60 bg-muted/20"
+                  >
+                    <div className="space-y-3 p-5">
+                      <div className="flex items-start gap-2 rounded-lg border border-orange-500/20 bg-orange-500/5 p-3 text-xs text-orange-700 dark:text-orange-300">
+                        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <div>
+                          <p className="font-medium">
+                            {t("localRefresh.customSourceTradeoffsTitle") ||
+                              "Reduced metadata"}
+                          </p>
+                          <p className="mt-1 leading-relaxed">
+                            {t("localRefresh.customSourceTradeoffsDesc") ||
+                              "Custom sources don't include cover images, categories, or popularity data."}
+                          </p>
+                        </div>
+                      </div>
+
+                      {customSourcesLibrary.filter(
+                        (s) => s?.url && s.url !== customSource?.url
+                      ).length > 0 && (
+                        <div>
+                          <div className="mb-2 flex items-center justify-between">
+                            <p className="text-xs font-semibold text-muted-foreground">
+                              {t("localRefresh.savedSources") || "Saved sources"}
+                            </p>
+                            <span className="text-[10px] text-muted-foreground/70">
+                              {t("localRefresh.savedSourcesHint") ||
+                                "Click to switch"}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {customSourcesLibrary
+                              .filter(
+                                (s) => s?.url && s.url !== customSource?.url
+                              )
+                              .slice(0, 6)
+                              .map((entry) => (
+                                <div
+                                  key={entry.url}
+                                  role="button"
+                                  tabIndex={isSyncingCustomSource ? -1 : 0}
+                                  aria-disabled={isSyncingCustomSource}
+                                  onClick={() => {
+                                    if (isSyncingCustomSource) return;
+                                    handleSwitchToSavedSource(entry);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (isSyncingCustomSource) return;
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      handleSwitchToSavedSource(entry);
+                                    }
+                                  }}
+                                  className="group flex cursor-pointer items-center gap-2 rounded-lg border border-border/60 bg-background p-2 text-left transition-colors hover:border-primary/40 hover:bg-primary/5 aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                                >
+                                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-muted">
+                                    <Database className="h-3.5 w-3.5 text-muted-foreground group-hover:text-primary" />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1">
+                                      <p className="truncate text-xs font-semibold">
+                                        {entry.name}
+                                      </p>
+                                      {entry.torrentOnly && (
+                                        <span
+                                          title={
+                                            t("localRefresh.torrentOnly") ||
+                                            "Torrent only"
+                                          }
+                                          className="inline-block h-1.5 w-1.5 rounded-full bg-orange-500"
+                                        />
+                                      )}
+                                    </div>
+                                    <p className="truncate text-[10px] text-muted-foreground">
+                                      {typeof entry.gameCount === "number"
+                                        ? `${entry.gameCount.toLocaleString()} ${t("localRefresh.games") || "games"}`
+                                        : entry.url}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removeLibraryEntry(entry.url);
+                                    }}
+                                    className="opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                                    title={t("common.remove") || "Remove"}
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="space-y-2 rounded-lg border border-border/60 bg-background p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-foreground">
+                            {t("localRefresh.sourceBucketLabel") ||
+                              "Source bucket URL"}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSourceBucketUrlDraft("https://library.hydra.wiki/")
+                            }
+                            className="text-[10px] text-primary hover:underline"
+                          >
+                            {t("localRefresh.sourceBucketUseRecommended") ||
+                              "Use recommended"}
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="url"
+                            inputMode="url"
+                            placeholder="Bucket URL..."
+                            value={sourceBucketUrlDraft}
+                            onChange={e => setSourceBucketUrlDraft(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleSaveSourceBucketUrl(sourceBucketUrlDraft);
+                              }
+                            }}
+                            disabled={isSyncingCustomSource}
+                            className="h-9 flex-1 text-xs"
+                          />
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => handleSaveSourceBucketUrl(sourceBucketUrlDraft)}
+                            disabled={
+                              isSyncingCustomSource ||
+                              !sourceBucketUrlDraft.trim() ||
+                              sourceBucketUrlDraft.trim() === sourceBucketUrl.trim()
+                            }
+                            className="h-9 text-secondary"
+                          >
+                            {t("localRefresh.sourceBucketSet") || "Set"}
+                          </Button>
+                          {sourceBucketUrl.trim() && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleSaveSourceBucketUrl("")}
+                              disabled={isSyncingCustomSource}
+                              className="h-9"
+                              title={t("common.clear") || "Clear"}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {t("localRefresh.sourceBucketHint") ||
+                            "Paste the URL of the source collection you want to pull from. Recommended: "}
+                          <span className="font-mono text-foreground">
+                            https://library.hydra.wiki/
+                          </span>
+                        </p>
+                      </div>
+
+                      {!customSource?.url && (
+                        <div className="space-y-2">
+                          <Button
+                            onClick={handleOpenSourceBrowser}
+                            disabled={!sourceBucketUrl.trim() || isSyncingCustomSource}
+                            variant="outline"
+                            className="w-full gap-2"
+                          >
+                            <Globe className="h-4 w-4" />
+                            {t("localRefresh.browseSources") ||
+                              "Browse sources"}
+                          </Button>
+                          <Button
+                            onClick={() => setShowJsonImportDialog(true)}
+                            variant="outline"
+                            className="w-full gap-2"
+                          >
+                            <Upload className="h-4 w-4" />
+                            {t("localRefresh.importJson") || "Import JSON Data"}
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   </motion.div>
                 )}
               </AnimatePresence>
-
-              {/* Not signed in message */}
-              {!isAuthenticated && (
-                <div className="mt-4 flex items-start gap-2 rounded-lg bg-purple-500/5 p-3 text-xs text-muted-foreground">
-                  <Info className="h-4 w-4 shrink-0 text-purple-500" />
-                  <span>
-                    {t("localRefresh.autoRefreshAscendInfo") ||
-                      "Sign in to Ascend to enable automatic index refreshing and keep your game library up to date effortlessly."}
-                  </span>
-                </div>
-              )}
             </Card>
 
-            {/* Progress Section */}
-            <AnimatePresence>
-                {(isRefreshing || isUploading || refreshStatus === "completed") && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    animate={{ opacity: 1, height: "auto", marginTop: 16 }}
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                    className="rounded-lg bg-muted/50 p-3"
+            {/* Custom Lists Management */}
+            {customSourcesMode && (
+              <Card className="overflow-hidden p-0 border-0">
+              <div className="flex items-start gap-3 p-5">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500/15 to-cyan-500/15">
+                  <ClipboardList className="h-5 w-5 text-blue-500" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-semibold">
+                          {t("localRefresh.customLists") || "Custom Lists"}
+                        </h3>
+                      </div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {t("localRefresh.customListsDesc") ||
+                          "Create and manage your own game lists from imported JSON data."}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {activeCustomList && (
+                        <Badge variant="default" className="text-xs">
+                          {activeCustomList.name}
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-border/60 bg-muted/20 p-5">
+                <div className="space-y-3">
+                  {/* Active Custom List Info */}
+                  {activeCustomList && (
+                    <div className="flex items-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/5 p-3">
+                      <CircleCheck className="h-4 w-4 text-blue-500" />
+                      <div className="text-sm">
+                        <p className="font-medium text-blue-700 dark:text-blue-300">
+                          {t("localRefresh.activeList") || "Active List"}: {activeCustomList.name}
+                        </p>
+                        <p className="text-xs text-blue-600 dark:text-blue-400">
+                          {activeCustomList.itemCount?.toLocaleString() || 0} {t("localRefresh.items") || "items"}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Custom Lists Grid */}
+                  {customLists.length > 0 && (
+                    <div>
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-xs font-semibold text-muted-foreground">
+                          {t("localRefresh.yourLists") || "Your Lists"}
+                        </p>
+                        <span className="text-[10px] text-muted-foreground/70">
+                          {t("localRefresh.savedSourcesHint") || "Click to switch"}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {customLists
+                          .filter((list) => list.id !== activeCustomList?.id)
+                          .slice(0, 6)
+                          .map((list) => (
+                            <div
+                              key={list.id}
+                              role="button"
+                              tabIndex={-1}
+                              onClick={() => handleSwitchToList(list)}
+                              className="group flex cursor-pointer items-center gap-2 rounded-lg border border-border/60 bg-background p-2 text-left transition-colors hover:border-blue-500/40 hover:bg-blue-500/5"
+                            >
+                              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-muted">
+                                <Database className="h-3.5 w-3.5 text-muted-foreground group-hover:text-blue-500" />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1">
+                                  <p className="truncate text-xs font-semibold">
+                                    {list.name}
+                                  </p>
+                                  {list.format && (
+                                    <Badge variant="outline" className="text-[10px]">
+                                      {list.format}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <p className="truncate text-[10px] text-muted-foreground">
+                                  {list.itemCount?.toLocaleString() || 0} {t("localRefresh.items") || "items"}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRenameList(list);
+                                  }}
+                                  className="opacity-0 transition-opacity hover:text-blue-500 group-hover:opacity-100"
+                                  title={t("common.rename") || "Rename"}
+                                >
+                                  <PencilIcon className="h-3 w-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteList(list);
+                                  }}
+                                  className="opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
+                                  title={t("common.delete") || "Delete"}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Import New List Button */}
+                  <Button
+                    onClick={() => setShowJsonImportDialog(true)}
+                    variant="outline"
+                    className="w-full gap-2"
                   >
+                    <Plus className="h-4 w-4" />
+                    {t("localRefresh.importNewList") || "Import New List"}
+                  </Button>
+                </div>
+              </div>
+            </Card>
+            )}
+
+            <AnimatePresence>
+              {(isRefreshing || isUploading || refreshStatus === "completed") && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                >
+                  <Card className="p-4">
                     <div className="space-y-3">
                       <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">
-                          {t("localRefresh.progress") || "Progress"}
+                        <span className="font-semibold">
+                          {isUploading
+                            ? t("localRefresh.sharing") || "Sharing..."
+                            : refreshStatus === "completed"
+                              ? t("localRefresh.statusCompleted") || "Complete"
+                              : t("localRefresh.progress") || "Progress"}
                         </span>
-                        {isUploading ? (
-                          <span className="font-medium text-blue-500">
-                            {t("localRefresh.sharing") || "Sharing..."}
-                          </span>
-                        ) : currentPhase !== "fetching_posts" &&
-                          currentPhase !== "fetching_categories" &&
-                          currentPhase !== "initializing" &&
-                          currentPhase !== "starting" &&
-                          currentPhase !== "waiting_for_cookie" ? (
-                          <span className="font-medium">{Math.round(progress)}%</span>
-                        ) : currentPhase === "waiting_for_cookie" ? (
+                        {isUploading ? null : currentPhase ===
+                          "waiting_for_cookie" ? (
                           <span className="font-medium text-orange-500">
-                            {t("localRefresh.waitingForCookieShort") || "Waiting..."}
+                            {t("localRefresh.waitingForCookieShort") ||
+                              "Waiting..."}
+                          </span>
+                        ) : !(
+                            currentPhase === "fetching_posts" ||
+                            currentPhase === "fetching_categories" ||
+                            currentPhase === "initializing" ||
+                            currentPhase === "starting"
+                          ) ? (
+                          <span className="font-semibold">
+                            {Math.round(progress)}%
                           </span>
                         ) : null}
                       </div>
@@ -1298,7 +2788,8 @@ const LocalRefresh = () => {
                           <div
                             className="absolute h-full rounded-full bg-blue-500"
                             style={{
-                              animation: "progress-loading 1.5s ease-in-out infinite",
+                              animation:
+                                "progress-loading 1.5s ease-in-out infinite",
                             }}
                           />
                         </div>
@@ -1307,7 +2798,8 @@ const LocalRefresh = () => {
                           <div
                             className="absolute h-full rounded-full bg-orange-500"
                             style={{
-                              animation: "progress-loading 2s ease-in-out infinite",
+                              animation:
+                                "progress-loading 2s ease-in-out infinite",
                             }}
                           />
                         </div>
@@ -1320,7 +2812,8 @@ const LocalRefresh = () => {
                           <div
                             className="absolute h-full rounded-full bg-primary"
                             style={{
-                              animation: "progress-loading 1.5s ease-in-out infinite",
+                              animation:
+                                "progress-loading 1.5s ease-in-out infinite",
                             }}
                           />
                         </div>
@@ -1330,147 +2823,83 @@ const LocalRefresh = () => {
                       {currentPhase === "processing_posts" &&
                         totalGames > 0 &&
                         !isUploading && (
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">
+                          <div className="flex items-center justify-between text-xs text-muted-foreground">
+                            <span>
                               {t("localRefresh.gamesProcessed") || "Games"}
                             </span>
-                            <span className="font-medium">
+                            <span className="font-semibold text-foreground">
                               {processedGames.toLocaleString()} /{" "}
                               {totalGames.toLocaleString()}
                             </span>
                           </div>
                         )}
                     </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+                  </Card>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-              {/* Errors Section */}
-              <AnimatePresence>
-                {errors.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    animate={{ opacity: 1, height: "auto", marginTop: 16 }}
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
+            <AnimatePresence>
+              {errors.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                >
+                  <button
+                    onClick={() => setShowErrors(!showErrors)}
+                    className="bg-destructive/10 flex w-full items-center justify-between rounded-lg p-3 text-sm"
                   >
-                    <button
-                      onClick={() => setShowErrors(!showErrors)}
-                      className="bg-destructive/10 flex w-full items-center justify-between rounded-lg p-3 text-sm"
-                    >
-                      <div className="text-destructive flex items-center gap-2">
-                        <AlertCircle className="h-4 w-4" />
-                        <span className="font-medium">
-                          {t("localRefresh.errors") || "Errors"} ({errors.length})
-                        </span>
-                      </div>
-                      {showErrors ? (
-                        <ChevronUp className="text-destructive/60 h-4 w-4" />
-                      ) : (
-                        <ChevronDown className="text-destructive/60 h-4 w-4" />
-                      )}
-                    </button>
-                    <AnimatePresence>
-                      {showErrors && (
-                        <motion.div
-                          initial={{ opacity: 0, height: 0 }}
-                          animate={{ opacity: 1, height: "auto" }}
-                          exit={{ opacity: 0, height: 0 }}
-                          className="mt-2 max-h-24 space-y-1 overflow-y-auto"
-                        >
-                          {errors.map((error, index) => (
-                            <div
-                              key={index}
-                              className="bg-destructive/10 flex items-center justify-between rounded px-2 py-1 text-xs"
-                            >
-                              <span className="text-destructive font-mono">
-                                {error.message}
-                              </span>
-                              <span className="text-destructive/60">
-                                {error.timestamp.toLocaleTimeString()}
-                              </span>
-                            </div>
-                          ))}
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-            {/* Action Row */}
-            <div className="grid gap-4 sm:grid-cols-2">
-              {/* Share Index Toggle */}
-              <Card className="p-4 sm:col-span-2">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${settings?.shareLocalIndex ? "bg-primary/10" : "bg-muted"}`}
-                    >
-                      <Share2
-                        className={`h-4 w-4 ${settings?.shareLocalIndex ? "text-primary" : "text-muted-foreground"}`}
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="text-sm font-medium">
-                        {t("localRefresh.shareIndex") || "Share Index"}
-                      </h3>
-                      <p className="text-xs text-muted-foreground">
-                        {t("localRefresh.shareIndexDesc") ||
-                          "Help others by sharing your index"}
-                      </p>
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant={settings?.shareLocalIndex ? "default" : "outline"}
-                    className={
-                      settings?.shareLocalIndex
-                        ? "shrink-0 gap-1.5 text-secondary"
-                        : "shrink-0 gap-1.5"
-                    }
-                    onClick={() =>
-                      updateSetting("shareLocalIndex", !settings?.shareLocalIndex)
-                    }
-                    disabled={isRefreshing}
-                  >
-                    {settings?.shareLocalIndex ? (
-                      <>
-                        <Upload className="h-3.5 w-3.5" />
-                        {t("localRefresh.sharingEnabled") || "On"}
-                      </>
-                    ) : (
-                      t("localRefresh.enableSharing") || "Enable"
-                    )}
-                  </Button>
-                </div>
-                {/* Warning if user has custom blacklisted games */}
-                {settings?.shareLocalIndex &&
-                  settings?.blacklistIDs?.some(
-                    id => !["ABSXUc", "AWBgqf", "ATaHuq"].includes(id)
-                  ) && (
-                    <div className="mt-3 flex items-start gap-2 rounded-lg bg-orange-500/10 p-2.5 text-xs text-orange-600 dark:text-orange-400">
-                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>
-                        {t("localRefresh.blacklistWarning") ||
-                          "Your index won't be shared because you have custom blacklisted games. Remove them to share your index with the community."}
+                    <div className="text-destructive flex items-center gap-2">
+                      <AlertCircle className="h-4 w-4" />
+                      <span className="font-semibold">
+                        {t("localRefresh.errors") || "Errors"} ({errors.length})
                       </span>
                     </div>
-                  )}
-              </Card>
-            </div>
-          </div>
+                    {showErrors ? (
+                      <ChevronUp className="text-destructive/60 h-4 w-4" />
+                    ) : (
+                      <ChevronDown className="text-destructive/60 h-4 w-4" />
+                    )}
+                  </button>
+                  <AnimatePresence>
+                    {showErrors && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="mt-2 max-h-40 space-y-1 overflow-y-auto"
+                      >
+                        {errors.map((error, index) => (
+                          <div
+                            key={index}
+                            className="bg-destructive/10 flex items-center justify-between rounded px-2 py-1 text-xs"
+                          >
+                            <span className="text-destructive font-mono">
+                              {error.message}
+                            </span>
+                            <span className="text-destructive/60">
+                              {error.timestamp.toLocaleTimeString()}
+                            </span>
+                          </div>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
-          {/* Right Column - Settings */}
-          <div className="space-y-4">
-            {/* Settings Card */}
-            <Card>
-              <div className="border-b border-border px-4 py-3">
-                <h3 className="flex items-center gap-2 font-medium">
-                  <Settings2 className="h-4 w-4 text-muted-foreground" />
-                  {t("localRefresh.settings") || "Settings"}
-                </h3>
-              </div>
-              <div className="divide-y divide-border">
+            <Accordion type="single" collapsible className="rounded-lg border border-border bg-card">
+              <AccordionItem value="advanced" className="border-b-0 px-4">
+                <AccordionTrigger className="py-3">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <Settings2 className="h-4 w-4 text-muted-foreground" />
+                    {t("localRefresh.advancedTitle") || t("localRefresh.settings") || "Advanced"}
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="space-y-4">
+              <div className="divide-y divide-border rounded-lg border border-border/60">
                 {/* Storage Location */}
                 <div className="p-4">
                   <div className="mb-2 flex items-center gap-2">
@@ -1624,24 +3053,10 @@ const LocalRefresh = () => {
                   )}
                 </div>
               </div>
-            </Card>
 
-            {/* Info Card */}
-            <Card className="bg-muted/30 p-4">
-              <div className="flex gap-3">
-                <Database className="h-5 w-5 shrink-0 text-primary" />
-                <div>
-                  <h3 className="text-sm font-medium">
-                    {t("localRefresh.whatThisDoes") || "About"}
-                  </h3>
-                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                    {t("localRefresh.whatThisDoesDescription") ||
-                      "Store game data locally for faster browsing and offline access."}
-                  </p>
-                </div>
-              </div>
-            </Card>
-          </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
         </div>
 
         {/* Stop Confirmation Dialog */}
@@ -1680,6 +3095,575 @@ const LocalRefresh = () => {
           mode="cookie-refresh"
           cookieRefreshCount={cookieRefreshCount}
         />
+
+        {/* External Source Bucket Browser Dialog */}
+        <Dialog open={sourceBrowserOpen} onOpenChange={setSourceBrowserOpen}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-2xl font-bold text-foreground">
+                <Globe className="h-5 w-5" />
+                {t("localRefresh.sourceBrowserTitle")}
+              </DialogTitle>
+              <DialogDescription className="text-muted-foreground">
+                {t("localRefresh.sourceBrowserDesc")}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-3">
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder={
+                    t("localRefresh.sourceBrowserSearchPlaceholder")
+                  }
+                  value={bucketSearchQuery}
+                  onChange={(e) => setBucketSearchQuery(e.target.value)}
+                  className="pl-9"
+                />
+              </div>
+
+              <div className="max-h-[55vh] min-h-[200px] space-y-2 overflow-y-auto pr-1">
+                {bucketSourcesLoading && (
+                  <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+                    <Loader className="h-4 w-4 animate-spin" />
+                    {t("localRefresh.sourcesLoading") || "Loading sources..."}
+                  </div>
+                )}
+                {bucketSourcesError && !bucketSourcesLoading && (
+                  <div className="flex flex-col items-center mt-4 gap-2 p-4 text-sm text-primary">
+                    <AlertCircle className="h-5 w-5" />
+                    <span>{bucketSourcesError}</span>
+                    <Button size="sm" className='text-primary' variant="outline" onClick={fetchBucketSources}>
+                      {t("common.retry") || "Retry"}
+                    </Button>
+                  </div>
+                )}
+                {!bucketSourcesLoading &&
+                  !bucketSourcesError &&
+                  filteredBucketSources.length === 0 && (
+                    <div className="py-8 text-center text-sm text-muted-foreground">
+                      {t("localRefresh.sourcesNoResults") || "No sources match your search."}
+                    </div>
+                  )}
+                {!bucketSourcesLoading &&
+                  !bucketSourcesError &&
+                  filteredBucketSources.map((source) => {
+                    const isSelected = customSource?.id === source.id;
+                    const trusted =
+                      Array.isArray(source.status) && source.status.includes("Trusted");
+                    return (
+                      <button
+                        key={source.id || source.url}
+                        type="button"
+                        onClick={() => handleSelectCustomSource(source)}
+                        disabled={isSyncingCustomSource}
+                        className={`flex w-full flex-col gap-2 rounded-lg border p-3 text-left transition-all disabled:opacity-50 ${
+                          isSelected
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:bg-accent/50"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <h4 className="truncate text-sm font-semibold text-primary">
+                                {source.title || source.name}
+                              </h4>
+                              {trusted && (
+                                <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />
+                              )}
+                              {isSelected && (
+                                <CircleCheck className="h-3.5 w-3.5 text-primary" />
+                              )}
+                            </div>
+                            {source.description && (
+                              <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                                {source.description}
+                              </p>
+                            )}
+                          </div>
+                          <div className="shrink-0 text-right text-xs text-muted-foreground">
+                            {typeof source.gamesCount === "number" && (
+                              <div className="font-medium text-foreground">
+                                {source.gamesCount.toLocaleString()}{" "}
+                                {t("localRefresh.games") || "games"}
+                              </div>
+                            )}
+                            {source.rating?.avg != null && (
+                              <div className="flex items-center justify-end gap-1">
+                                <Star className="h-3 w-3 text-amber-500" />
+                                <span>{source.rating.avg.toFixed(2)}</span>
+                                {source.rating.total ? (
+                                  <span className="text-muted-foreground/70">
+                                    ({source.rating.total})
+                                  </span>
+                                ) : null}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {Array.isArray(source.topDownloadOption) &&
+                          source.topDownloadOption.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {source.topDownloadOption.slice(0, 4).map((opt, idx) => (
+                                <Badge
+                                  key={`${source.id}-${opt.name}-${idx}`}
+                                  variant="outline"
+                                  className="text-[10px]"
+                                >
+                                  {opt.name}
+                                  {typeof opt.count === "number" &&
+                                    ` · ${opt.count.toLocaleString()}`}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+
+            <DialogFooter className="flex-row items-center justify-between sm:justify-between">
+              <p className="text-xs text-muted-foreground">
+                {t("localRefresh.sourcesAttribution")}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-primary"
+                onClick={() => setSourceBrowserOpen(false)}
+              >
+                {t("common.close") || "Close"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        <AlertDialog open={torrentWarningOpen} onOpenChange={setTorrentWarningOpen}>
+          <AlertDialogContent className="max-w-md">
+            <AlertDialogHeader>
+              <AlertDialogTitle className="flex items-center gap-2 text-2xl font-bold text-foreground">
+                <AlertTriangle className="h-5 w-5 text-orange-500" />
+                {t("localRefresh.torrentOnlyDialogTitle") ||
+                  "This source uses torrents only"}
+              </AlertDialogTitle>
+              <AlertDialogDescription className="space-y-2 text-muted-foreground">
+                <span className="block">
+                  {(torrentWarningSource?.blocked
+                    ? t("localRefresh.torrentOnlyDialogBlocked") ||
+                      "{{name}} only publishes magnet links, so you can't select it until torrenting is enabled in Settings."
+                    : t("localRefresh.torrentOnlyDialogBody") ||
+                      "{{name}} only publishes magnet links. To download anything from it you'll need to enable torrenting in Settings."
+                  ).replace(
+                    "{{name}}",
+                    torrentWarningSource?.name || "This source"
+                  )}
+                </span>
+                <span className="block rounded-md border border-orange-500/30 bg-orange-500/5 p-2 text-xs text-orange-700 dark:text-orange-300">
+                  {t("localRefresh.torrentOnlyDialogVpn") ||
+                    "Torrenting exposes your IP to peers — using a VPN is strongly recommended."}
+                </span>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel className="text-primary">
+                {t("localRefresh.torrentOnlyDialogLater") || "Not now"}
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-orange-500 text-white hover:bg-orange-600"
+                onClick={() => {
+                  setTorrentWarningOpen(false);
+                  navigate("/settings", {
+                    state: { scrollTo: "torrent-downloads", scrollToBottom: true },
+                  });
+                }}
+              >
+                {t("localRefresh.torrentOnlyDialogOpenSettings") ||
+                  "Open Settings"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Manual paste fallback dialog (shown when upstream returns 403) */}
+        <Dialog
+          open={manualPasteOpen}
+          onOpenChange={(open) => {
+            setManualPasteOpen(open);
+            // If the dialog is being closed (via cancel / escape / backdrop)
+            // and the user never successfully ingested anything, revert the
+            // pending source selection so we don't persist an unloaded source.
+            if (!open && previousCustomSourceRef.current !== null) {
+              revertPendingCustomSource();
+            }
+          }}
+        >
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-2xl font-bold text-foreground">
+                <ShieldCheck className="h-5 w-5 text-amber-500" />
+                {t("localRefresh.manualPasteTitle") ||
+                  "Couldn't fetch source automatically"}
+              </DialogTitle>
+              <DialogDescription className="text-muted-foreground">
+                {t("localRefresh.manualPasteDesc") ||
+                  "The source is protected by a browser challenge (Cloudflare) that Ascendara can't solve on its own. We've opened the source URL in your browser — once the page loads the JSON, copy the entire text and paste it below."}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-3">
+              {manualPasteSourceUrl && (
+                <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+                  <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <code className="flex-1 truncate text-foreground font-mono text-[11px]">
+                    {manualPasteSourceUrl}
+                  </code>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-xs text-primary"
+                    onClick={() => {
+                      if (window.electron?.openURL && manualPasteSourceUrl) {
+                        window.electron.openURL(manualPasteSourceUrl);
+                      }
+                    }}
+                  >
+                    {t("localRefresh.openAgain") || "Open again"}
+                  </Button>
+                </div>
+              )}
+
+              <textarea
+                value={manualPasteText}
+                onChange={e => {
+                  setManualPasteText(e.target.value);
+                  if (manualPasteError) setManualPasteError(null);
+                }}
+                placeholder={
+                  t("localRefresh.manualPastePlaceholder") ||
+                  'Paste the full JSON here (should start with { "name": ... "downloads": [...] })'
+                }
+                spellCheck={false}
+                className="h-56 w-full text-foreground resize-none rounded-md border bg-background p-3 font-mono text-xs leading-relaxed outline-none focus:ring-2 focus:ring-primary/40"
+              />
+
+              {manualPasteError && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {manualPasteError}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter className="flex items-center justify-between gap-2 sm:justify-between">
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-primary"
+                onClick={handlePasteFromClipboard}
+                disabled={isIngestingManual}
+              >
+                {t("localRefresh.pasteFromClipboard") || "Paste from clipboard"}
+              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-primary"
+                  onClick={() => setManualPasteOpen(false)}
+                  disabled={isIngestingManual}
+                >
+                  {t("common.cancel") || "Cancel"}
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleIngestManualJson}
+                  disabled={isIngestingManual || !manualPasteText.trim()}
+                >
+                  {isIngestingManual
+                    ? t("localRefresh.importing") || "Importing..."
+                    : t("localRefresh.importJson") || "Import JSON"}
+                </Button>
+              </div>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* JSON Import Dialog */}
+        <Dialog open={showJsonImportDialog} onOpenChange={setShowJsonImportDialog}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-2xl font-bold text-foreground">
+                <Upload className="h-5 w-5 text-primary" />
+                {t("localRefresh.jsonImportTitle") || "Import Game JSON Data"}
+              </DialogTitle>
+              <DialogDescription className="text-muted-foreground">
+                {t("localRefresh.jsonImportDesc") ||
+                  "Paste your game JSON data below. Supports both standard game formats and download list formats."}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between rounded-md border border-muted bg-muted/30 p-3">
+                <span className="text-sm text-muted-foreground">
+                  {t("localRefresh.jsonLearnMore") || "Learn more about supported formats"}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-3 text-xs text-primary"
+                  onClick={() => {  
+                      window.electron.openURL("https://ascendara.app/docs/features/external-sources");
+                  }}
+                >
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  {t("common.docs") || "Docs"}
+                </Button>
+              </div>
+
+              <textarea
+                value={jsonImportText}
+                onChange={e => {
+                  setJsonImportText(e.target.value);
+                  if (jsonImportError) setJsonImportError(null);
+                }}
+                placeholder={
+                  t("localRefresh.jsonImportPlaceholder") ||
+                  'Paste your JSON data here (e.g., { "games": [...] } or { "name": "...", "downloads": [...] })'
+                }
+                spellCheck={false}
+                className="h-56 w-full text-foreground resize-none rounded-md border bg-background p-3 font-mono text-xs leading-relaxed outline-none focus:ring-2 focus:ring-primary/40"
+              />
+
+              {jsonImportError && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {jsonImportError}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter className="flex items-center justify-between gap-2 sm:justify-between">
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-primary"
+                onClick={handlePasteJsonFromClipboard}
+                disabled={isProcessingJson}
+              >
+                {t("localRefresh.pasteFromClipboard") || "Paste from clipboard"}
+              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-primary"
+                  onClick={() => setShowJsonImportDialog(false)}
+                  disabled={isProcessingJson}
+                >
+                  {t("common.cancel") || "Cancel"}
+                </Button>
+                <Button
+                  size="sm"
+                  className="text-muted"
+                  onClick={handleProcessJsonImport}
+                  disabled={isProcessingJson || !jsonImportText.trim()}
+                >
+                  {isProcessingJson
+                    ? t("localRefresh.processing") || "Processing..."
+                    : t("localRefresh.processJson") || "Process JSON"}
+                </Button>
+              </div>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* JSON Import Confirmation Dialog */}
+        <Dialog open={showJsonConfirmDialog} onOpenChange={setShowJsonConfirmDialog}>
+          <DialogContent className="max-w-3xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-2xl font-bold text-foreground">
+                <ShieldCheck className="h-5 w-5 text-emerald-500" />
+                {t("localRefresh.jsonConfirmTitle") || "Confirm JSON Import"}
+              </DialogTitle>
+              <DialogDescription className="text-muted-foreground">
+                {t("localRefresh.jsonConfirmDesc") ||
+                  "Review the detected structure and game count before importing."}
+              </DialogDescription>
+            </DialogHeader>
+
+            {jsonImportData && (
+              <div className="space-y-4">
+                <Card className="p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <PencilIcon className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm font-semibold">
+                      {t("localRefresh.listName") || "List Name"}
+                    </span>
+                  </div>
+                  <Input
+                    value={jsonListName}
+                    onChange={e => setJsonListName(e.target.value)}
+                    placeholder={
+                      t("localRefresh.listNamePlaceholder") || "Enter a name for this list..."
+                    }
+                    className="w-full"
+                  />
+                </Card>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Card className="p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Database className="h-4 w-4 text-primary" />
+                      <span className="text-sm font-semibold">
+                        {t("localRefresh.jsonDetectedFormat") || "Detected Structure"}
+                      </span>
+                    </div>
+                    <Badge variant="outline" className="text-xs">
+                      {jsonImportData.type === 'games' 
+                        ? `Array: "games" (${jsonImportData.gameCount} items)`
+                        : jsonImportData.type === 'downloads'
+                        ? `Array: "downloads" (${jsonImportData.gameCount} items)`
+                        : `Object with ${jsonImportData.gameCount} items`
+                      }
+                    </Badge>
+                  </Card>
+
+                  <Card className="p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Zap className="h-4 w-4 text-emerald-500" />
+                      <span className="text-sm font-semibold">
+                        {t("localRefresh.jsonItemCount") || "Total Items"}
+                      </span>
+                    </div>
+                    <div className="text-lg font-bold text-primary">
+                      {jsonImportData.gameCount.toLocaleString()}
+                    </div>
+                  </Card>
+                </div>
+
+                <Card className="p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Settings2 className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm font-semibold">
+                      {t("localRefresh.jsonDetectedKeys") || "Detected Keys"}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {jsonImportData.keys.map((key, index) => (
+                      <Badge key={index} variant="outline" className="text-[10px]">
+                        {key}
+                      </Badge>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground">
+                      {t("localRefresh.jsonLearnMore") || "Learn more about supported formats"}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-6 px-2 text-xs"
+                      onClick={() => {
+                        if (window.electron?.openURL) {
+                          window.electron.openURL("https://ascendara.app/docs");
+                        } else {
+                          window.open("https://ascendara.app/docs", "_blank");
+                        }
+                      }}
+                    >
+                      <ExternalLink className="h-3 w-3 mr-1" />
+                      {t("common.docs") || "Docs"}
+                    </Button>
+                  </div>
+                </Card>
+
+                {jsonImportData.sampleGames && jsonImportData.sampleGames.length > 0 && (
+                  <Card className="p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Star className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm font-semibold">
+                        {t("localRefresh.jsonSampleItems") || "Sample Items"}
+                      </span>
+                    </div>
+                    <div className="max-h-32 overflow-y-auto space-y-2">
+                      {jsonImportData.sampleGames.map((item, index) => (
+                        <div key={index} className="text-xs border-l-2 border-muted pl-2">
+                          <div className="font-mono text-primary">
+                            {jsonImportData.type === 'games' 
+                              ? item.game || item.title || `Item ${index + 1}`
+                              : item.title || item.name || `Item ${index + 1}`
+                            }
+                          </div>
+                          <div className="text-muted-foreground mt-1">
+                            {Object.keys(item).slice(0, 3).map(key => {
+                              const value = item[key];
+                              let displayValue = '';
+                              
+                              if (typeof value === 'string') {
+                                displayValue = value.length > 30 ? value.substring(0, 30) + '...' : value;
+                              } else if (typeof value === 'object' && value !== null) {
+                                if (key === 'uris' && Array.isArray(value)) {
+                                  // Special handling for URIs array - check this FIRST
+                                  displayValue = value.slice(0, 2).map(uri => 
+                                    typeof uri === 'string' ? uri.substring(0, 20) + '...' : 'Object'
+                                  ).join(', ') + (value.length > 2 ? '...' : '');
+                                } else if (Array.isArray(value)) {
+                                  displayValue = `Array[${value.length}]`;
+                                } else {
+                                  displayValue = `Object{${Object.keys(value).length}}`;
+                                }
+                              } else {
+                                displayValue = String(value);
+                              }
+                              
+                              return (
+                                <span key={key} className="mr-2">
+                                  {key}: {displayValue}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                )}
+
+                <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs text-emerald-700 dark:text-emerald-300">
+                  <div className="flex items-start gap-2">
+                    <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <div>
+                      <p className="font-medium">
+                        {t("localRefresh.jsonDynamicAdapt") || "Dynamic Adaptation"}
+                      </p>
+                      <p className="mt-1 leading-relaxed">
+                        {t("localRefresh.jsonDynamicAdaptDesc") || "Ascendara will automatically adapt to your JSON structure without requiring format conversion. The detected keys and structure will be preserved."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <DialogFooter className="flex items-center justify-between gap-2 sm:justify-between">
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-primary"
+                onClick={() => setShowJsonConfirmDialog(false)}
+              >
+                {t("common.cancel") || "Cancel"}
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleConfirmJsonImport}
+                disabled={!jsonListName.trim()}
+                className="bg-emerald-500 text-white hover:bg-emerald-600 disabled:opacity-50"
+              >
+                {t("localRefresh.importJson") || "Import JSON Data"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

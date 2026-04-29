@@ -33,6 +33,7 @@ import { useSettings } from "@/context/SettingsContext";
 import { useAuth } from "@/context/AuthContext";
 import { sanitizeText, formatLatestUpdate } from "@/lib/utils";
 import imageCacheService from "@/services/imageCacheService";
+import steamGridImageService from "@/services/steamGridImageService";
 import { cacheDownloadData } from "@/services/retryGameDownloadService";
 import { addToQueue, hasActiveDownloads, getDownloadQueue } from "@/services/downloadQueueService";
 import { forceSyncDownloads, notifyDownloadStart } from "@/services/downloadSyncService";
@@ -86,6 +87,12 @@ import {
 import nexusModsService from "@/services/nexusModsService";
 import flingTrainerService from "@/services/flingTrainerService";
 import verifiedGamesService from "@/services/verifiedGamesService";
+import gameService from "@/services/gameService";
+import {
+  SEAMLESS_PROVIDERS,
+  VERIFIED_PROVIDERS as CENTRAL_VERIFIED_PROVIDERS,
+  TORBOX_PROVIDER_DISPLAY_NAMES,
+} from "@/config/providers";
 
 // Async validation using API patterns
 const isValidURL = async (url, provider, patterns) => {
@@ -112,14 +119,7 @@ const checkTorboxStatus = async provider => {
     }
     const data = await response.json();
     
-    const providerMap = {
-      "1fichier": "1Fichier",
-      "megadb": "MegaDB",
-      "gofile": "GoFile",
-      "buzzheavier": "Buzzheavier",
-    };
-    
-    const torboxName = providerMap[provider.toLowerCase()];
+    const torboxName = TORBOX_PROVIDER_DISPLAY_NAMES[provider.toLowerCase()];
     if (!torboxName) {
       console.log(`No TorBox mapping for provider: ${provider}`);
       return null;
@@ -304,6 +304,7 @@ export default function DownloadPage() {
   const [isDev, setIsDev] = useState(false);
   const [showNoDownloadPath, setShowNoDownloadPath] = useState(false);
   const [cachedImage, setCachedImage] = useState(null);
+  const [coverGridUrl, setCoverGridUrl] = useState(null);
   const [isValidLink, setIsValidLink] = useState(true);
   const [torrentRunning, setIsTorrentRunning] = useState(false);
   const [showCopySuccess, setShowCopySuccess] = useState(false);
@@ -340,6 +341,7 @@ export default function DownloadPage() {
   const [isVerified, setIsVerified] = useState(false);
   const [showVerifiedDialog, setShowVerifiedDialog] = useState(false);
   const [torboxDisabledForSession, setTorboxDisabledForSession] = useState(false);
+  const [isExternalSourcesMode, setIsExternalSourcesMode] = useState(false);
 
   // Fetch rating from new API when using local index
   useEffect(() => {
@@ -452,6 +454,22 @@ export default function DownloadPage() {
     setIsPlayLater(isInList);
   }, [gameData?.game]);
 
+  // Check if user is in external sources mode
+  useEffect(() => {
+    const checkExternalSourcesMode = async () => {
+      try {
+        const { metadata } = await gameService.getCachedData();
+        const isCustomSource = metadata?.customSource === true;
+        setIsExternalSourcesMode(isCustomSource);
+      } catch (error) {
+        console.error("Error checking external sources mode:", error);
+        setIsExternalSourcesMode(false);
+      }
+    };
+
+    checkExternalSourcesMode();
+  }, []);
+
   // Track if autoStart has been processed
   const autoStartProcessed = useRef(false);
 
@@ -459,9 +477,8 @@ export default function DownloadPage() {
   useEffect(() => {
     const startSeamlessDownload = async () => {
       if (state?.autoStart && gameData?.download_links && !isStartingDownload && !autoStartProcessed.current) {
-        const seamlessHosts = ["gofile", "buzzheavier", "pixeldrain"];
         const availableHosts = Object.keys(gameData.download_links);
-        const seamlessHost = availableHosts.find(host => seamlessHosts.includes(host));
+        const seamlessHost = availableHosts.find(host => SEAMLESS_PROVIDERS.includes(host));
         
         if (seamlessHost) {
           console.log("[AutoStart] Starting download with seamless host:", seamlessHost);
@@ -533,8 +550,8 @@ export default function DownloadPage() {
   const steamSectionRef = useRef(null);
   const mainContentRef = useRef(null);
   const scrollThreshold = 220;
-  const seamlessProviders = ["gofile", "buzzheavier", "pixeldrain"];
-  const VERIFIED_PROVIDERS = ["megadb", "gofile", "buzzheavier", "pixeldrain"];
+  const seamlessProviders = SEAMLESS_PROVIDERS;
+  const VERIFIED_PROVIDERS = CENTRAL_VERIFIED_PROVIDERS;
 
   async function whereToDownload(directUrl = null) {
     console.log("[DL] whereToDownload called, directUrl:", directUrl);
@@ -623,6 +640,105 @@ export default function DownloadPage() {
       // Ascend users get the queue dialog with unlimited queue
       setPendingDownloadData(downloadData);
       setShowQueuePrompt(true);
+      return;
+    }
+
+    // Handle magnet/torrent links from custom (external) sources. These come
+    // through gameData.download_links.torrent = ["magnet:?xt=..."] from the
+    // Hydra-compatible JSON format. They're not DDL providers, so we skip the
+    // provider UI entirely and hand the magnet URI straight to the downloader.
+    const isMagnet = (s) => typeof s === "string" && s.trim().toLowerCase().startsWith("magnet:");
+    const torrentLinksFromGame = Array.isArray(gameData.download_links?.torrent)
+      ? gameData.download_links.torrent.filter(Boolean)
+      : [];
+    const isTorrentProvider =
+      selectedProvider === "torrent" ||
+      isMagnet(directUrl) ||
+      (!selectedProvider && torrentLinksFromGame.some(isMagnet));
+
+    if (isTorrentProvider) {
+      const magnetLink =
+        (isMagnet(directUrl) ? directUrl : null) ||
+        torrentLinksFromGame.find(isMagnet) ||
+        torrentLinksFromGame[0];
+
+      if (!magnetLink) {
+        console.log("[DL] EARLY RETURN: no magnet link in torrent provider");
+        toast.error(t("download.toast.invalidLink"));
+        return;
+      }
+
+      if (!settings.torrentEnabled) {
+        toast.error(
+          t("download.toast.torrentDisabled") ||
+            "Enable torrenting in Settings to download this game."
+        );
+        return;
+      }
+
+      if (!torrentRunning) {
+        toast.error(
+          t("download.downloadOptions.torrentInstructions.noTorrent") ||
+            "qBittorrent is not running. Start qBittorrent and try again."
+        );
+        return;
+      }
+
+      if (isStartingDownload) {
+        console.log("Download already in progress, skipping");
+        return;
+      }
+      setIsStartingDownload(true);
+      cacheDownloadData(sanitizedGameName, gameData);
+
+      try {
+        const isVrGame = gameData.category?.includes("Virtual Reality");
+        await window.electron.downloadFile(
+          magnetLink,
+          sanitizedGameName,
+          gameData.online || false,
+          gameData.dlc || false,
+          isVrGame || false,
+          gameData.isUpdating || false,
+          gameData.version || "",
+          gameData.imgID,
+          gameData.size || "",
+          dir,
+          gameData.gameID || ""
+        );
+
+        notifyDownloadStart(sanitizedGameName, gameData.game);
+
+        try {
+          await fetch('https://api.ascendara.app/stats/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ game: gameData.game })
+          });
+        } catch (error) {
+          console.error('Failed to track download:', error);
+        }
+
+        const removeDownloadListener = window.electron.onDownloadProgress(
+          downloadInfo => {
+            if (downloadInfo.game === sanitizedGameName) {
+              setIsStartingDownload(false);
+              removeDownloadListener();
+              forceSyncDownloads();
+            }
+          }
+        );
+
+        setTimeout(() => {
+          toast.success(t("download.toast.torrentSent"));
+          navigate("/downloads");
+        }, 2500);
+      } catch (error) {
+        console.error("Torrent download failed:", error);
+        toast.error(t("download.toast.downloadFailed"));
+        setIsStartingDownload(false);
+        clearDownloadLock();
+      }
       return;
     }
 
@@ -1167,9 +1283,37 @@ export default function DownloadPage() {
   useEffect(() => {
     window.scrollTo(0, 0);
     const loadCachedImage = async () => {
-      const image = await imageCacheService.getImage(gameData.imgID);
-      setCachedImage(image);
+      if (gameData?.imgID) {
+        const image = await imageCacheService.getImage(gameData.imgID);
+        setCachedImage(image);
+        return;
+      }
+      // Fallback: custom-source games (no imgID) -> resolve SteamGrid cover by name
+      if (gameData?.game) {
+        const peeked = steamGridImageService.peek(gameData.game);
+        if (peeked) {
+          setCachedImage(steamGridImageService.pickUrl(peeked, "hero"));
+          return;
+        }
+        const assets = await steamGridImageService.getAssets(gameData.game);
+        setCachedImage(steamGridImageService.pickUrl(assets, "hero"));
+      }
     };
+    // Resolve a portrait SteamGridDB cover (600x900) for the detail-page cover
+    // slot. SGDB is the primary art source; Steam header_image is the fallback
+    // and is applied directly at render time if this comes back null.
+    const loadCoverGrid = async () => {
+      if (!gameData?.game) return;
+      try {
+        const full = await steamGridImageService.getFullAssets(gameData.game);
+        if (full?.grid) {
+          setCoverGridUrl(full.grid);
+        }
+      } catch (e) {
+        // Silent: Steam cover fallback renders automatically
+      }
+    };
+    loadCoverGrid();
     loadCachedImage();
     checkDownloadPath();
   }, [gameData, navigate]);
@@ -1610,10 +1754,22 @@ export default function DownloadPage() {
 
   const providers = hasProviders
     ? Object.entries(downloadLinks)
-        .filter(([_, links]) => {
+        .filter(([provider, links]) => {
           if (!Array.isArray(links)) return false;
           if (links.length === 0) return false;
-          return links.some(link => typeof link === "string" && link.length > 0);
+          const hasValidLink = links.some(
+            link => typeof link === "string" && link.length > 0
+          );
+          if (!hasValidLink) return false;
+          if (provider === "torrent") {
+            const hasMagnet = links.some(
+              link =>
+                typeof link === "string" &&
+                link.trim().toLowerCase().startsWith("magnet:")
+            );
+            return hasMagnet && !!settings.torrentEnabled;
+          }
+          return true;
         })
         .map(([provider]) => provider)
     : [];
@@ -1628,25 +1784,36 @@ export default function DownloadPage() {
       const availableProviders = Object.keys(gameData.download_links).filter(
         provider => gameData.download_links[provider]?.length > 0
       );
+      const ddlProviders = availableProviders.filter(p => p !== "torrent");
 
-      if (availableProviders.includes("gofile")) {
+      if (ddlProviders.includes("gofile")) {
         setSelectedProvider("gofile");
       } else if (
         torboxService.isEnabled(settings) &&
-        availableProviders.includes("1fichier")
+        ddlProviders.includes("1fichier")
       ) {
         setSelectedProvider("1fichier");
-      } else if (availableProviders.includes("buzzheavier")) {
+      } else if (ddlProviders.includes("buzzheavier")) {
         setSelectedProvider("buzzheavier");
-      } else if (availableProviders.length > 0) {
-        setSelectedProvider(availableProviders[0]);
+      } else if (ddlProviders.length > 0) {
+        setSelectedProvider(ddlProviders[0]);
+      } else if (
+        availableProviders.includes("torrent") &&
+        settings.torrentEnabled
+      ) {
+        setSelectedProvider("torrent");
       } else {
         setSelectedProvider("");
       }
     } else {
       setSelectedProvider("");
     }
-  }, [gameData, settings.prioritizeTorboxOverSeamless, settings.torboxApiKey]);
+  }, [
+    gameData,
+    settings.prioritizeTorboxOverSeamless,
+    settings.torboxApiKey,
+    settings.torrentEnabled,
+  ]);
 
   if (gameData && gameData.game) {
     gameData.game = sanitizeGameName(gameData.game);
@@ -2235,7 +2402,7 @@ export default function DownloadPage() {
                     )}
 
                     {/* Auto Updates Feature */}
-                    {providers.some(p => seamlessProviders.includes(p)) && (
+                    {providers.some(p => seamlessProviders.includes(p)) && !isExternalSourcesMode && (
                       <div className="group/item flex items-center gap-2.5 transition-transform duration-200 hover:scale-105">
                         <div className="relative flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-primary/10 shadow-sm ring-1 ring-primary/20 transition-all duration-200 group-hover/item:shadow-md group-hover/item:ring-primary/30">
                           <RefreshCw className="h-4 w-4 text-primary transition-transform duration-200 group-hover/item:scale-110" />
@@ -2398,6 +2565,57 @@ export default function DownloadPage() {
                   <Button
                     onClick={() => whereToDownload()}
                     disabled={isStartingDownload || !gameData || !torrentRunning}
+                    className="mt-6 h-12 w-full max-w-xs text-lg text-secondary"
+                  >
+                    {isStartingDownload ? (
+                      <>
+                        {t("download.sendingTorrent")}
+                        <Loader className="ml-2 h-4 w-4 animate-spin" />
+                      </>
+                    ) : (
+                      t("download.downloadOptions.downloadTorrent")
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : selectedProvider === "torrent" ? (
+            /* Custom Source Torrent Download */
+            <div className="rounded-xl border border-border/30 bg-card p-6">
+              <div className="mx-auto max-w-lg">
+                <div className="flex flex-col items-center text-center">
+                  <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
+                    <ArrowDownCircle className="h-7 w-7 text-primary" />
+                  </div>
+                  <h2 className="text-xl font-semibold">
+                    {t("download.downloadOptions.torrentInstructions.title") || "Torrent Download"}
+                  </h2>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {t("download.downloadOptions.torrentInstructions.description")}
+                  </p>
+
+                  {!settings.torrentEnabled && (
+                    <div className="mt-4 flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-2 text-sm text-yellow-600">
+                      <AlertTriangle className="h-4 w-4" />
+                      {t("download.toast.torrentDisabled") ||
+                        "Enable torrenting in Settings to download this game."}
+                    </div>
+                  )}
+                  {settings.torrentEnabled && !torrentRunning && (
+                    <div className="mt-4 flex items-center gap-2 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-2 text-sm text-yellow-600">
+                      <AlertTriangle className="h-4 w-4" />
+                      {t("download.downloadOptions.torrentInstructions.noTorrent")}
+                    </div>
+                  )}
+
+                  <Button
+                    onClick={() => whereToDownload()}
+                    disabled={
+                      isStartingDownload ||
+                      !gameData ||
+                      !settings.torrentEnabled ||
+                      !torrentRunning
+                    }
                     className="mt-6 h-12 w-full max-w-xs text-lg text-secondary"
                   >
                     {isStartingDownload ? (
@@ -2982,16 +3200,32 @@ export default function DownloadPage() {
 
                     <div className="absolute bottom-0 left-0 right-0 flex items-end p-8">
                       <div className="relative z-10 flex w-full flex-col md:flex-row md:items-end">
-                        {/* Game Cover */}
-                        {steamData.cover && (
+                        {/* Game Cover - SteamGridDB portrait primary, Steam header fallback */}
+                        {(coverGridUrl || steamData.cover) && (
                           <div className="mb-4 h-[200px] w-[150px] shrink-0 overflow-hidden rounded-md border border-border shadow-lg md:mb-0 md:mr-6">
                             <img
-                              src={steamService.formatImageUrl(
-                                steamData.cover.url,
-                                "cover_big"
-                              )}
+                              src={
+                                coverGridUrl ||
+                                steamService.formatImageUrl(
+                                  steamData.cover.url,
+                                  "cover_big"
+                                )
+                              }
                               alt={steamData.name}
                               className="h-full w-full object-cover"
+                              onError={e => {
+                                // If SGDB URL fails at load time, swap to Steam cover
+                                if (
+                                  coverGridUrl &&
+                                  steamData.cover &&
+                                  e.currentTarget.src !== steamData.cover.url
+                                ) {
+                                  e.currentTarget.src = steamService.formatImageUrl(
+                                    steamData.cover.url,
+                                    "cover_big"
+                                  );
+                                }
+                              }}
                             />
                           </div>
                         )}

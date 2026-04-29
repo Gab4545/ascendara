@@ -46,9 +46,11 @@ import {
   Cloud,
   CloudOff,
   Terminal,
+  RefreshCw,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import gameUpdateService from "@/services/gameUpdateService";
+import { SEAMLESS_PROVIDERS } from "@/config/providers";
 import { loadFolders, saveFolders } from "@/lib/folderManager";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/context/SettingsContext";
@@ -763,6 +765,7 @@ export default function GameScreen() {
   // Achievements state
   const [achievements, setAchievements] = useState(null);
   const [achievementsLoading, setAchievementsLoading] = useState(true);
+  const [refreshingAchievements, setRefreshingAchievements] = useState(false);
 
   // Game update state
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -867,6 +870,51 @@ export default function GameScreen() {
     };
     fetchAchievements();
   }, [game]);
+
+  const handleRefreshAchievements = async () => {
+    if (!game || refreshingAchievements) return;
+
+    setRefreshingAchievements(true);
+    try {
+      const oldAchievements = achievements;
+      const result = await window.electron.readGameAchievements(
+        game.game || game.name,
+        game.isCustom
+      );
+
+      // Check for newly unlocked achievements
+      if (oldAchievements && result && result.achievements) {
+        const oldUnlocked = new Set(
+          oldAchievements.achievements
+            .filter(a => a.achieved)
+            .map(a => a.achID || a.message)
+        );
+
+        const newUnlocked = result.achievements.filter(
+          a => a.achieved && !oldUnlocked.has(a.achID || a.message)
+        );
+
+        if (newUnlocked.length > 0) {
+          toast.success(
+            t("gameScreen.newAchievementsFound", { count: newUnlocked.length }),
+            {
+              description: newUnlocked.map(a => a.message).join(", "),
+            }
+          );
+        } else {
+          toast.success(t("gameScreen.achievementsRefreshed"));
+        }
+      } else {
+        toast.success(t("gameScreen.achievementsRefreshed"));
+      }
+
+      setAchievements(result);
+    } catch (e) {
+      console.error("Error refreshing achievements:", e);
+      toast.error(t("gameScreen.refreshAchievementsError"));
+    }
+    setRefreshingAchievements(false);
+  };
 
   useEffect(() => {
     const init = async () => {
@@ -1822,7 +1870,7 @@ export default function GameScreen() {
             <div className="mt-3 flex items-center gap-3 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-4 py-3">
               <AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
               <p className="text-sm text-yellow-600 dark:text-yellow-400">
-                UMU Launcher is not installed - this game may crash at launch.
+                {t("gameScreen.umuLauncherNotInstalled")}
               </p>
               <Button
                 size="sm"
@@ -1830,7 +1878,7 @@ export default function GameScreen() {
                 className="ml-auto shrink-0 border-yellow-500/50 text-yellow-600"
                 onClick={() => navigate("/settings")}
               >
-                Install in Settings
+                {t("gameScreen.installInSettings")}
               </Button>
             </div>
           )}
@@ -2240,9 +2288,7 @@ export default function GameScreen() {
                             </TooltipTrigger>
                             <TooltipContent className="max-w-xs">
                               <p className="text-xs">
-                                The UMU ID links this game to Protonfixes, which automatically
-                                installs missing DLLs and redistributables (DirectX, Visual C++…)
-                                on launch. Find IDs at{" "}
+                                {t("gameScreen.umuIdDescription")}{" "}
                                 <button
                                   onClick={() => window.electron.openURL("https://umu.openwinecomponents.org")}
                                   className="underline"
@@ -2954,14 +3000,26 @@ export default function GameScreen() {
                               {t("gameScreen.achievements")}
                             </span>
                           </div>
-                          <div>
-                            <span className="mr-1 text-xl font-semibold text-primary">
-                              {achievements.achievements.filter(a => a.achieved).length}
-                            </span>
-                            <span className="font-medium text-muted-foreground">
-                              /{achievements.achievements.length}{" "}
-                              {t("gameScreen.achievementsUnlocked")}
-                            </span>
+                          <div className="flex items-center gap-4">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-primary hover:text-primary"
+                              onClick={handleRefreshAchievements}
+                              disabled={refreshingAchievements}
+                              title={t("gameScreen.refreshAchievements")}
+                            >
+                              <RefreshCw className={`h-4 w-4 ${refreshingAchievements ? "animate-spin" : ""}`} />
+                            </Button>
+                            <div>
+                              <span className="mr-1 text-xl font-semibold text-primary">
+                                {achievements.achievements.filter(a => a.achieved).length}
+                              </span>
+                              <span className="font-medium text-muted-foreground">
+                                /{achievements.achievements.length}{" "}
+                                {t("gameScreen.achievementsUnlocked")}
+                              </span>
+                            </div>
                           </div>
                         </div>
                         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
@@ -3055,12 +3113,24 @@ export default function GameScreen() {
                       </>
                     ) : (
                       <div className="flex flex-col items-center justify-center space-y-4 py-12 text-center">
-                        <div className="rounded-full bg-muted p-4">
-                          <Award className="h-12 w-12 text-muted-foreground" />
+                        <div className="flex items-center gap-4">
+                          <div className="rounded-full bg-muted p-4">
+                            <Award className="h-12 w-12 text-muted-foreground" />
+                          </div>
                         </div>
                         <div className="space-y-2">
                           <p className="font-medium">
                             {t("gameScreen.noAchievementsFound")}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-primary hover:bg-transparent hover:text-primary"
+                            onClick={handleRefreshAchievements}
+                            disabled={refreshingAchievements}
+                            title={t("gameScreen.refreshAchievements")}
+                          >
+                            <RefreshCw className={`h-4 w-4 ${refreshingAchievements ? "animate-spin" : ""}`} />
+                          </Button>
                           </p>
                           <p className="max-w-sm text-sm text-muted-foreground">
                             {t("gameScreen.noAchievementsDescription")}
@@ -4087,8 +4157,8 @@ export default function GameScreen() {
                   return;
                 }
 
-                // Try seamless providers: gofile first, then buzzheavier, then pixeldrain
-                const seamlessProviders = ["gofile", "buzzheavier", "pixeldrain"];
+                // Try seamless providers in priority order from central config
+                const seamlessProviders = SEAMLESS_PROVIDERS;
                 const downloadLinks = updateInfo?.downloadLinks || {};
 
                 let downloadUrl = null;
