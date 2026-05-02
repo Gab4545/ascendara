@@ -612,6 +612,11 @@ const LocalRefresh = () => {
     };
 
     const handlePublicDownloadComplete = async () => {
+      // If index doesn't exist yet, mark for auto-activation
+      const currentSettings = await window.electron.getSettings();
+      if (!currentSettings?.usingLocalIndex) {
+        wasFirstIndexRef.current = true;
+      }
       console.log("Public index download complete");
       setDownloadingIndex(null);
       setIndexDownloadProgress(null);
@@ -705,6 +710,9 @@ const LocalRefresh = () => {
   };
 
   const handleStartRefresh = async refreshData => {
+    if (localIndexPath) {
+      await window.electron.updateSetting("localIndex", localIndexPath);
+    }
     setIsRefreshing(true);
     setRefreshStatus("running");
     setProgress(0);
@@ -719,6 +727,11 @@ const LocalRefresh = () => {
     try {
       // Call the electron API to start the local refresh process
       if (window.electron?.startLocalRefresh) {
+        // If index doesn't exist yet, mark for auto-activation
+        const currentSettings = await window.electron.getSettings();
+        if (!currentSettings?.usingLocalIndex) {
+          wasFirstIndexRef.current = true;
+        }
         const result = await window.electron.startLocalRefresh({
           outputPath: localIndexPath,
           cfClearance: refreshData.cfClearance,
@@ -737,6 +750,7 @@ const LocalRefresh = () => {
       }
     } catch (error) {
       console.error("Failed to start refresh:", error);
+      wasFirstIndexRef.current = false; 
       setRefreshStatus("error");
       setIsRefreshing(false);
       setErrors(prev => [...prev, { message: error.message, timestamp: new Date() }]);
