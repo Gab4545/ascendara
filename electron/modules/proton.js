@@ -79,6 +79,135 @@ function ensureLinuxDirectories() {
   console.log("[Proton] Linux directories ensured:", linuxConfigDir);
 }
 
+/**
+ * Scans game folder for known fix patterns
+ */
+function detectGameFixes(gamePath) {
+  const fs = require('fs');
+  const path = require('path');
+  const overrides = [];
+  let steamOverlayGameId = null;
+  let ldPreload = null;
+
+  const addOverride = (dll, mode = 'n') => {
+    if (!overrides.includes(`${dll}=${mode}`)) {
+      overrides.push(`${dll}=${mode}`);
+    }
+  };
+
+  const fileExists = (file) => fs.existsSync(path.join(gamePath, file));
+
+  // 1) Standard OnlineFix
+  if (fileExists('onlinefix.ini')) {
+    console.log('[proton] Detected OnlineFix (onlinefix.ini)');
+    addOverride('OnlineFix64', 'n');
+    addOverride('steam_api64', 'n');
+    addOverride('d3d11', 'n');
+    addOverride('d3d10', 'n');
+    try {
+      const content = fs.readFileSync(path.join(gamePath, 'onlinefix.ini'), 'utf8');
+      const match = content.match(/SteamOverlayGameId\s*=\s*(\d+)/i);
+      if (match) steamOverlayGameId = match[1];
+    } catch (_) {}
+    if (!steamOverlayGameId) steamOverlayGameId = '480';
+  }
+
+  // 2) SteamFix
+  if (fileExists('steamfix.ini')) {
+    console.log('[proton] Detected SteamFix (steamfix.ini)');
+    addOverride('steam_api64', 'n');
+    addOverride('steam_api', 'n');
+  }
+
+  // 3) EOSFix
+  if (fileExists('eosauthhooker.dll') || fs.readdirSync(gamePath).some(f => /^eos.*\.dll$/i.test(f))) {
+    console.log('[proton] Detected EOSFix');
+    addOverride('EOSSDK-Win64-Shipping', 'n');
+    addOverride('EOSSDK-Win32-Shipping', 'n');
+  }
+
+  // 4) Photon
+  const hasPhoton = fs.readdirSync(gamePath).some(f => /^launch_data\.of/i.test(f)) || fileExists('onlinefix.json');
+  if (hasPhoton) {
+    console.log('[proton] Detected Photon Launcher');
+    addOverride('Newtonsoft.Json', 'n');
+    addOverride('steam_api64', 'n');
+  }
+
+  // 5) Generic DLLs
+  const genericDlls = ['emp.dll', 'custom.dll', 'winmm.dll', 'dsound.dll', 'd3d9.dll', 'xinput1_3.dll'];
+  genericDlls.forEach(dll => {
+    if (fileExists(dll)) addOverride(dll.replace('.dll', ''), 'n');
+  });
+
+  // 6) dlllist.txt
+  if (fileExists('dlllist.txt')) {
+    try {
+      const content = fs.readFileSync(path.join(gamePath, 'dlllist.txt'), 'utf8');
+      content.split(/\r?\n/).forEach(line => {
+        line = line.trim();
+        if (line && !line.startsWith('#')) {
+          const dllName = line.replace(/\.dll$/i, '');
+          addOverride(dllName, 'n');
+        }
+      });
+    } catch (_) {}
+  }
+
+  // 7) SpaceWar steam_appid.txt
+  if (fileExists('steam_appid.txt')) {
+    console.log('[proton] Detected steam_appid.txt, rewriting to 480 (SpaceWar)');
+    try {
+      fs.writeFileSync(path.join(gamePath, 'steam_appid.txt'), '480', 'utf8');
+      console.log('[proton] steam_appid.txt rewritten to 480 (SpaceWar)');
+    } catch (_) {}
+    addOverride('steam_api64', 'n');
+    if (!steamOverlayGameId) steamOverlayGameId = '480';
+  }
+
+  // 8) Fallback
+  if (fileExists('steam_api64.dll') && overrides.length === 0) {
+    addOverride('steam_api64', 'n');
+  }
+
+  const winedllOverrides = overrides.join(';');
+
+  // Determine LD_PRELOAD
+  try {
+    const { execSync } = require('child_process');
+    const steamLib = execSync('find ~/.steam/ -name "gameoverlayrenderer.so" 2>/dev/null | head -n1', { encoding: 'utf8' }).trim();
+    if (steamLib) ldPreload = steamLib;
+  } catch (_) {}
+
+  console.log('[proton] Generated WINEDLLOVERRIDES:', winedllOverrides);
+  console.log('[proton] LD_PRELOAD:', ldPreload);
+  console.log('[proton] SteamOverlayGameId:', steamOverlayGameId);
+
+  return {
+    winedllOverrides,
+    steamOverlayGameId,
+    ldPreload
+  };
+}
+
+/**
+ * Normalize override string to ensure no duplicate entries
+ */
+function normalizeOverrides(overrides) {
+  if (!overrides) return '';
+  const parts = overrides.split(';').filter(Boolean);
+  const unique = [];
+  const seen = new Set();
+  for (const p of parts) {
+    const key = p.split('=')[0];
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(p);
+    }
+  }
+  return unique.join(';');
+}
+
 // Proton Detection
 
 /**
@@ -1306,16 +1435,23 @@ async function resolveRunner(gameOverride) {
  * Returns: { cmd: string[], env: object, runner: object } or null
  */
 async function buildLaunchConfig(gameName, exePath, gameRunnerOverride, umuId, store) {
+  const gamePath = path.dirname(exePath);
   const { linuxUmuBin } = require("./config");
   const compatDataPath = getCompatDataPath(gameName);
   const winePrefix = path.join(compatDataPath, "pfx");
   fs.ensureDirSync(winePrefix);
 
+  // Fixes detection
+  const fix = detectGameFixes(gamePath);
+
+  // Construction of the environment according to the mode
+  let env = {};
+  let cmd, mode, runner;
+
   // UMU Mode (prioritized if umu-run is installed)
   if (isUmuInstalled()) {
-    const runner = await resolveRunner(gameRunnerOverride);
-
-    const env = {
+    const runnerObj = await resolveRunner(gameRunnerOverride);
+    env = {
       WINEPREFIX: winePrefix,
       GAMEID: umuId || "umu-default",
       STEAM_COMPAT_DATA_PATH: compatDataPath,
@@ -1323,57 +1459,72 @@ async function buildLaunchConfig(gameName, exePath, gameRunnerOverride, umuId, s
 
     // PROTONPATH only if we have an explicit runner
     // otherwise, umu-run will automatically use UMU-Proton.
-    if (runner && runner.type === "proton") {
-      env.PROTONPATH = runner.path;
+    if (runnerObj && runnerObj.type === "proton") {
+      env.PROTONPATH = runnerObj.path;
     }
 
     // STORE (optional) (egs, gog, steam, humble, itchio, none...)
     if (store && store !== "none") {
       env.STORE = store;
     }
-
-    return {
-      cmd: [linuxUmuBin, exePath],
-      env,
-      runner: runner || { name: "UMU-Proton (auto)", type: "proton" },
-      compatDataPath,
-      mode: "umu",
-    };
-  }
-
-  // Fallback : umu-run not installed
-  const runner = await resolveRunner(gameRunnerOverride);
-  if (!runner) {
-    return { error: "No compatible runner found. Please install UMU-Launcher or Proton-GE." };
-  }
-
-  if (runner.type === "proton") {
-    return {
-      cmd: [path.join(runner.path, "proton"), "run", exePath],
-      env: {
+    // Apply fixes on env
+    if (fix.winedllOverrides) {
+      const userOverrides = env.WINEDLLOVERRIDES || '';
+      env.WINEDLLOVERRIDES = normalizeOverrides(userOverrides ? `${userOverrides};${fix.winedllOverrides}` : fix.winedllOverrides);
+    }
+    if (fix.ldPreload) {
+      env.LD_PRELOAD = env.LD_PRELOAD ? `${fix.ldPreload}:${env.LD_PRELOAD}` : fix.ldPreload;
+    }
+    if (fix.steamOverlayGameId) {
+      env.SteamOverlayGameId = fix.steamOverlayGameId;
+    }
+    cmd = [linuxUmuBin, exePath];
+    mode = "umu";
+    runner = runnerObj || { name: "UMU-Proton (auto)", type: "proton" };
+  } else {
+    // Fallback Proton (direct) or Wine
+    const runnerObj = await resolveRunner(gameRunnerOverride);
+    if (!runnerObj) {
+      return { error: "No compatible runner found. Please install UMU-Launcher or Proton-GE." };
+    }
+    if (runnerObj.type === "proton") {
+      env = {
         STEAM_COMPAT_DATA_PATH: compatDataPath,
         STEAM_COMPAT_CLIENT_INSTALL_PATH: findSteamInstallPath(),
-      },
-      runner,
-      compatDataPath,
-      mode: "proton-direct",
-    };
-  }
-
-  if (runner.type === "wine") {
-    return {
-      cmd: [runner.path, exePath],
-      env: {
+      };
+      // Apply fixes
+      if (fix.winedllOverrides) {
+        env.WINEDLLOVERRIDES = normalizeOverrides(fix.winedllOverrides);
+      }
+      if (fix.ldPreload) env.LD_PRELOAD = fix.ldPreload;
+      if (fix.steamOverlayGameId) env.SteamOverlayGameId = fix.steamOverlayGameId;
+      cmd = [path.join(runnerObj.path, "proton"), "run", exePath];
+      mode = "proton-direct";
+      runner = runnerObj;
+    } else if (runnerObj.type === "wine") {
+      env = {
         WINEPREFIX: winePrefix,
         WINEDLLOVERRIDES: "winemenubuilder.exe=d",
-      },
-      runner,
-      compatDataPath,
-      mode: "wine",
-    };
+      };
+      // Apply fixes (merging is possible)
+      if (fix.winedllOverrides) {
+        env.WINEDLLOVERRIDES = normalizeOverrides(env.WINEDLLOVERRIDES + ';' + fix.winedllOverrides);
+      }
+      if (fix.ldPreload) env.LD_PRELOAD = fix.ldPreload;
+      if (fix.steamOverlayGameId) env.SteamOverlayGameId = fix.steamOverlayGameId;
+      cmd = [runnerObj.path, exePath];
+      mode = "wine";
+      runner = runnerObj;
+    } else {
+      return { error: "Unknown runner type" };
+    }
   }
 
-  return { error: "Unknown runner type" };
+  console.log('[proton] Final WINEDLLOVERRIDES:', env.WINEDLLOVERRIDES);
+  console.log('[proton] Final LD_PRELOAD:', env.LD_PRELOAD);
+  console.log('[proton] Final SteamOverlayGameId:', env.SteamOverlayGameId);
+
+  return { cmd, env, runner, compatDataPath, mode };
 }
 
 // IPC Handlers

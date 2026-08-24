@@ -69,6 +69,9 @@ def parse_linux_runner_args(args):
         "steam_path": None,
         "umu_id": None,
         "proton_path": None,
+        "wine_overrides": None,
+        "ld_preload": None,
+        "steam_overlay_game_id": None,
     }
 
     i = 0
@@ -90,6 +93,15 @@ def parse_linux_runner_args(args):
             i += 2
         elif args[i] == "--linux-proton-path" and i + 1 < len(args):
             config["proton_path"] = args[i + 1]
+            i += 2
+        elif args[i] == "--wine-overrides" and i + 1 < len(args):
+            config["wine_overrides"] = args[i + 1]
+            i += 2
+        elif args[i] == "--linux-ld-preload" and i + 1 < len(args):
+            config["ld_preload"] = args[i + 1]
+            i += 2
+        elif args[i] == "--linux-steam-overlay-game-id" and i + 1 < len(args):
+            config["steam_overlay_game_id"] = args[i + 1]
             i += 2
         else:
             i += 1
@@ -197,6 +209,18 @@ def launch_with_proton(exe_path, linux_config, game_launch_cmd=None):
     env = _clean_pyinstaller_env(os.environ.copy())
     env["STEAM_COMPAT_DATA_PATH"] = linux_config["compat_data"]
 
+    # Apply overrides
+    if linux_config.get("wine_overrides"):
+        existing = env.get("WINEDLLOVERRIDES", "")
+        env["WINEDLLOVERRIDES"] = merge_wine_overrides(existing, linux_config["wine_overrides"])
+    if linux_config.get("ld_preload"):
+        env["LD_PRELOAD"] = linux_config["ld_preload"]
+    if linux_config.get("steam_overlay_game_id"):
+        env["SteamOverlayGameId"] = linux_config["steam_overlay_game_id"]
+    logging.info(f"[PROTON] Applied wine_overrides: {env.get('WINEDLLOVERRIDES', '')}")
+    logging.info(f"[PROTON] Applied LD_PRELOAD: {env.get('LD_PRELOAD', '')}")
+    logging.info(f"[PROTON] Applied SteamOverlayGameId: {env.get('SteamOverlayGameId', '')}")
+
     if linux_config.get("steam_path"):
         env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = linux_config["steam_path"]
 
@@ -254,6 +278,18 @@ def launch_with_wine_isolated(exe_path, linux_config, game_launch_cmd=None):
     env = _clean_pyinstaller_env(os.environ.copy())
     env["WINEPREFIX"] = prefix_path
     env["WINEDLLOVERRIDES"] = "winemenubuilder.exe=d"
+
+    # Apply overrides
+    if linux_config.get("wine_overrides"):
+        existing = env.get("WINEDLLOVERRIDES", "")
+        env["WINEDLLOVERRIDES"] = merge_wine_overrides(existing, linux_config["wine_overrides"])
+    if linux_config.get("ld_preload"):
+        env["LD_PRELOAD"] = linux_config["ld_preload"]
+    if linux_config.get("steam_overlay_game_id"):
+        env["SteamOverlayGameId"] = linux_config["steam_overlay_game_id"]
+    logging.info(f"[WINE] Applied wine_overrides: {env.get('WINEDLLOVERRIDES', '')}")
+    logging.info(f"[WINE] Applied LD_PRELOAD: {env.get('LD_PRELOAD', '')}")
+    logging.info(f"[WINE] Applied SteamOverlayGameId: {env.get('SteamOverlayGameId', '')}")
 
     if "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env:
         env["DISPLAY"] = ":0"
@@ -377,6 +413,32 @@ def install_vcredist(prefix_path, env, umu_bin=None):
     else:
         logging.warning("[VCREDIST] Some redistributables failed to install, will retry next launch")
 
+def merge_wine_overrides(user_overrides, auto_overrides):
+    """
+    Merge two WINEDLLOVERRIDES strings.
+    User overrides have priority (they appear first).
+    Duplicate DLL entries are resolved by keeping the first occurrence.
+    """
+    if not user_overrides and not auto_overrides:
+        return ''
+    user_parts = [p.strip() for p in user_overrides.split(';') if p.strip()]
+    auto_parts = [p.strip() for p in auto_overrides.split(';') if p.strip()]
+    
+    user_dlls = set()
+    for p in user_parts:
+        dll = p.split('=')[0]
+        user_dlls.add(dll)
+    
+    merged = user_parts[:]
+    for p in auto_parts:
+        dll = p.split('=')[0]
+        if dll not in user_dlls:
+            merged.append(p)
+            user_dlls.add(dll)
+    
+    return ';'.join(merged)
+
+
 def launch_with_umu(exe_path, linux_config, game_launch_cmd=None):
     """
     Launch a Windows executable using umu-run.
@@ -396,6 +458,18 @@ def launch_with_umu(exe_path, linux_config, game_launch_cmd=None):
     env = _clean_pyinstaller_env(os.environ.copy())
     env["GAMEID"] = linux_config.get("umu_id") or "umu-default"
     env["WINEPREFIX"] = prefix_path
+
+    # Apply overrides
+    if linux_config.get("wine_overrides"):
+        existing = env.get("WINEDLLOVERRIDES", "")
+        env["WINEDLLOVERRIDES"] = merge_wine_overrides(existing, linux_config["wine_overrides"])
+    if linux_config.get("ld_preload"):
+        env["LD_PRELOAD"] = linux_config["ld_preload"]
+    if linux_config.get("steam_overlay_game_id"):
+        env["SteamOverlayGameId"] = linux_config["steam_overlay_game_id"]
+    logging.info(f"[UMU] Applied wine_overrides: {env.get('WINEDLLOVERRIDES', '')}")
+    logging.info(f"[UMU] Applied LD_PRELOAD: {env.get('LD_PRELOAD', '')}")
+    logging.info(f"[UMU] Applied SteamOverlayGameId: {env.get('SteamOverlayGameId', '')}")
 
     # optional PROTONPATH - if empty, umu-run uses UMU-Proton
     if linux_config.get("proton_path"):

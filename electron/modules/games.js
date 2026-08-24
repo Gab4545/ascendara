@@ -562,6 +562,17 @@ function registerGameHandlers() {
             proton.findSteamInstallPath()
           );
 
+          gameHandlerArgs.push(
+            '--wine-overrides', launchConfig.env.WINEDLLOVERRIDES || '',
+            '--linux-ld-preload', launchConfig.env.LD_PRELOAD || '',
+            '--linux-steam-overlay-game-id', launchConfig.env.SteamOverlayGameId || ''
+          );
+          console.log('[Games] Linux overrides sent to handler:', {
+            wineOverrides: launchConfig.env.WINEDLLOVERRIDES,
+            ldPreload: launchConfig.env.LD_PRELOAD,
+            steamOverlayGameId: launchConfig.env.SteamOverlayGameId
+          });
+
           // If UMU mode, append necessary env arguments
           if (launchConfig.mode === "umu") {
             gameHandlerArgs.push(
